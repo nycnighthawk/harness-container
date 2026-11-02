@@ -185,7 +185,9 @@ eq     "built binary runs on the host"       "$("$PROJ/HelloMac/.build/debug/hel
 eq     "build products owned by you"         "$(stat -f %u "$PROJ/HelloMac/.build")" "$U"
 if xcodebuild -version >/dev/null 2>&1; then
   out="$("$SB" --project "$PROJ/HelloMac" --net none --shell -c '
-    scheme=$(xcodebuild -list 2>/dev/null | awk "/Schemes:/{f=1;next} f&&NF{print \$1}" | grep -m1 -E "^HelloMac-Package$|^HelloCore$")
+    schemes=$(xcodebuild -list 2>/dev/null | awk "/Schemes:/{f=1;next} f&&NF{print \$1}")
+    echo "schemes: $(echo $schemes)"
+    scheme=$(printf "%s\n" $schemes | grep -m1 -xE "HelloMac-Package|HelloMac") || scheme=$(printf "%s\n" $schemes | head -1)
     echo "scheme=$scheme"
     xcodebuild -scheme "$scheme" -destination "platform=macOS" test 2>&1 | tail -25' </dev/null 2>&1)"
   case "$out" in *"TEST SUCCEEDED"*) ok "xcodebuild test passes (DerivedData in ~/Library/Developer)" ;; *) nok "xcodebuild test passes" "$out" ;; esac
