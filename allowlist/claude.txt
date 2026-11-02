@@ -1,0 +1,11 @@
+# Always included in --net restricted. Hosts Claude Code itself needs.
+# Source: https://code.claude.com/docs/en/network-config#network-access-requirements
+# Format: one extended regex per line, matched against the host name.
+^api\.anthropic\.com$
+^claude\.ai$
+^claude\.com$
+^platform\.claude\.com$
+^downloads\.claude\.ai$
+^code\.claude\.com$
+^mcp-proxy\.anthropic\.com$
+^raw\.githubusercontent\.com$

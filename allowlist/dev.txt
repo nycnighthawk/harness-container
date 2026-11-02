@@ -1,0 +1,23 @@
+# Add with: --allow dev   (package registries + GitHub for normal development)
+# GitHub (HTTPS git clone/push, releases, API)
+^github\.com$
+^api\.github\.com$
+^codeload\.github\.com$
+^objects\.githubusercontent\.com$
+^(.*\.)?githubusercontent\.com$
+# JavaScript
+^registry\.npmjs\.org$
+^registry\.yarnpkg\.com$
+^nodejs\.org$
+# Python
+^pypi\.org$
+^files\.pythonhosted\.org$
+# Rust
+^(index\.)?crates\.io$
+^static\.crates\.io$
+^static\.rust-lang\.org$
+# Go
+^proxy\.golang\.org$
+^sum\.golang\.org$
+# Debian packages (if you run apt inside a --shell session as root)
+^deb\.debian\.org$
