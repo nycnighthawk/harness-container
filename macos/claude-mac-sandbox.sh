@@ -208,7 +208,10 @@ esac
 
 proxy_pid=""
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/claude-mac-sandbox.XXXXXX")"
-cleanup() { [ -n "$proxy_pid" ] && kill "$proxy_pid" 2>/dev/null; rm -rf "$workdir"; }
+cleanup() {
+  if [ -n "$proxy_pid" ]; then kill "$proxy_pid" 2>/dev/null; wait "$proxy_pid" 2>/dev/null; fi
+  rm -rf "$workdir"
+}
 trap cleanup EXIT INT TERM HUP
 
 if [ "$net" = restricted ]; then
