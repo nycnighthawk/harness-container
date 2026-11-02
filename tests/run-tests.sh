@@ -117,10 +117,11 @@ expect_no "look-alike host blocked"             sb --net restricted -- "$(code h
 expect_no "bypassing proxy (direct IP) fails"   sb --net restricted -- 'curl -sS --noproxy "*" --max-time 8 https://1.1.1.1 -o /dev/null'
 expect_no "bypassing proxy (direct DNS) fails"  sb --net restricted -- 'curl -sS --noproxy "*" --max-time 8 https://api.anthropic.com -o /dev/null'
 proxy="$(podman ps --filter label=claude-sandbox.proxy -q | head -1)"
-if [[ -n "$proxy" ]] && podman logs "$proxy" 2>&1 | grep -q 'refused on filtered domain "example.com"'; then
+plog="$( [[ -n "$proxy" ]] && podman logs "$proxy" 2>&1)"
+if [[ "$plog" == *'refused on filtered domain "example.com"'* ]]; then
   ok "proxy log records the blocked host"
 else
-  nok "proxy log records the blocked host" "$( [[ -n "$proxy" ]] && podman logs "$proxy" 2>&1 | tail -20)"
+  nok "proxy log records the blocked host" "$(tail -20 <<<"$plog")"
 fi
 endsec
 
@@ -149,8 +150,10 @@ expect    "--auth login injects no credential"           sb --net none --auth lo
 "$SB" --project "$PROJ" --net none --auth apikey --shell -c 'sleep 20' </dev/null >/dev/null 2>&1 &
 bg=$!; sleep 4
 cid="$(podman ps --filter label=claude-sandbox=1 -q | head -1)"
-if [[ -n "$cid" ]] && ! podman inspect "$cid" | grep -q 'sk-ant-api03-DUMMY'; then ok "secret value absent from podman inspect"
-else nok "secret value absent from podman inspect" "cid=$cid"; fi
+insp="$( [[ -n "$cid" ]] && podman inspect "$cid")"
+if [[ -n "$insp" && "$insp" != *sk-ant-api03-DUMMY* ]]; then ok "secret value absent from podman inspect"
+else nok "secret value absent from podman inspect" "cid=$cid $(grep -n DUMMY <<<"$insp" | head -3)"; fi
+expect "secret file readable only by sandbox user" sb --net none --auth apikey -- '[ "$(stat -c "%u %a" /run/secrets/anthropic_api_key)" = "1000 400" ]' 
 [[ -n "$cid" ]] && podman rm -f "$cid" >/dev/null 2>&1; wait "$bg" 2>/dev/null
 podman secret rm anthropic_api_key claude_oauth_token >/dev/null
 expect_no "--auth apikey fails cleanly without secret" "$SB" --project "$PROJ" --auth apikey --shell -c true

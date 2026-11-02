@@ -66,5 +66,7 @@ ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.npm-global/bin:${PATH}
     NPM_CONFIG_CACHE="/home/${USERNAME}/.cache/npm" \
     PIP_CACHE_DIR="/home/${USERNAME}/.cache/pip"
 
+COPY --chmod=0755 sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint
+
 WORKDIR /workspace
-ENTRYPOINT ["claude"]
+ENTRYPOINT ["/usr/local/bin/sandbox-entrypoint"]

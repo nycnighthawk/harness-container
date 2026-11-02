@@ -98,9 +98,9 @@ secret_ok() { podman secret inspect "$1" >/dev/null 2>&1; }
 case "$auth" in
   login)  ;;  # subscription via /login; saved in the config volume
   token)  secret_ok claude_oauth_token || die "create secret claude_oauth_token first"
-          args+=(--secret claude_oauth_token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN) ;;
+          args+=(--secret claude_oauth_token,type=mount,uid=1000,gid=1000,mode=0400) ;;
   apikey) secret_ok anthropic_api_key || die "create secret anthropic_api_key first"
-          args+=(--secret anthropic_api_key,type=env,target=ANTHROPIC_API_KEY) ;;
+          args+=(--secret anthropic_api_key,type=mount,uid=1000,gid=1000,mode=0400) ;;
   *)      die "unknown --auth '$auth' (login|token|apikey)" ;;
 esac
 
@@ -161,7 +161,7 @@ esac
 
 # --------------------------------------------------------------------- run
 if ((shell)); then
-  args+=(--entrypoint /bin/bash "$IMAGE" "${passthru[@]}")
+  args+=("$IMAGE" --shell "${passthru[@]}")
 else
   ((yolo)) && passthru=(--dangerously-skip-permissions "${passthru[@]}")
   args+=("$IMAGE" "${passthru[@]}")
