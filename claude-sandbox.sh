@@ -85,7 +85,7 @@ args=(
 )
 
 # Resource limits only if the cgroup controllers are delegated to this user.
-controllers="$(podman info --format '{{join .Host.CgroupControllers " "}}' 2>/dev/null || true)"
+controllers="$(podman info --format '{{.Host.CgroupControllers}}' | tr -d '[]' 2>/dev/null || true)"
 [[ " $controllers " == *" memory "* ]] && args+=(--memory="$memory")
 [[ " $controllers " == *" cpu "* ]]    && args+=(--cpus="$cpus")
 

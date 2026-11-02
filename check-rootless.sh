@@ -48,7 +48,7 @@ backend="$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null)"
   || { warn "network backend: ${backend:-unknown} (restricted mode needs netavark + aardvark-dns)"; fix "install netavark aardvark-dns, then: podman system reset (DELETES all containers/images)"; }
 
 cg="$(podman info --format '{{.Host.CgroupsVersion}}' 2>/dev/null)"
-ctl="$(podman info --format '{{join .Host.CgroupControllers " "}}' 2>/dev/null)"
+ctl="$(podman info --format '{{.Host.CgroupControllers}}' | tr -d '[]' 2>/dev/null)"
 if [[ "$cg" == "v2" ]]; then
   pass "cgroups v2"
   for c in memory cpu pids; do

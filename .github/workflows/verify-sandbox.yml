@@ -19,7 +19,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: shellcheck
         run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh
       - name: hadolint
@@ -36,30 +36,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Prepare rootless podman
-        run: |
-          set -x
-          podman --version
-          # restricted mode needs netavark + aardvark-dns (container-name DNS on internal networks)
-          if [ "$(podman info --format '{{.Host.NetworkBackend}}')" != "netavark" ]; then
-            sudo apt-get update -q
-            sudo apt-get install -y -q netavark aardvark-dns
-            podman system reset -f
-          fi
-          podman info --format 'rootless={{.Host.Security.Rootless}} backend={{.Host.NetworkBackend}} cgroups={{.Host.CgroupsVersion}} controllers={{.Host.CgroupControllers}} rootlessNet={{.Host.RootlessNetworkCmd}}'
-          grep "^$(id -un):" /etc/subuid /etc/subgid
+        run: .github/ci-step.sh .github/prepare-podman.sh
 
       - name: Build sandbox image
-        run: podman build -t claude-sandbox .
+        run: .github/ci-step.sh podman build -t claude-sandbox .
 
       - name: Build proxy image
-        run: podman build -t claude-sandbox-proxy proxy/
+        run: .github/ci-step.sh podman build -t claude-sandbox-proxy proxy/
 
       - name: Run verification suite
         env:
           # Optional: add these repository secrets to enable the live Claude tests.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: tests/run-tests.sh
+        run: .github/ci-step.sh tests/run-tests.sh
