@@ -29,7 +29,7 @@ nok()  { fail=$((fail+1)); failed="$failed
          if [ -n "${2:-}" ]; then printf '%s\n' "$2" | sed 's/^/       /' | tail -25; fi
          gh_annot error "$1" "$(printf '%s' "${2:-}" | tail -c 900 | tr '\n' ' ')"; }
 skp()  { skip=$((skip+1)); printf '\033[33m skip \033[0m %s\n' "$1"; gh_annot notice "skipped: $1" "${2:-}"; }
-note() { printf '\033[36m note \033[0m %s\n' "$1"; gh_annot notice "$1" "${2:-}"; }
+note() { printf '\033[36m note \033[0m %s\n' "$1"; gh_annot notice "sandbox note" "$1"; }
 section() { printf '\n\033[1m== %s\033[0m\n' "$1"; if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::$1"; fi; }
 endsec()  { if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi; }
 
@@ -174,6 +174,14 @@ expect    "--allow dev: git clone over HTTPS"         sb --net restricted --allo
 expect_no "--allow dev: example.com still blocked"    sb --net restricted --allow dev -- "$(code https://example.com/)"
 printf '^example\\.com$\n' > "$BASE/allow.txt"
 expect    "custom --allow FILE works"                 sb --net restricted --allow "$BASE/allow.txt" -- "$(code https://example.com/)"
+# A dev server started inside is reachable from your browser on the host, even in restricted mode.
+echo "served" > "$PROJ/index.txt"
+"$SB" --project "$PROJ" --net restricted --shell -c 'exec python3 -m http.server 18181 --bind 127.0.0.1' </dev/null >"$BASE/srv.log" 2>&1 &
+srv=$!; got=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do got="$(curl -s --max-time 2 http://127.0.0.1:18181/index.txt)"; [ "$got" = served ] && break; sleep 1; done
+if [ "$got" = served ]; then ok "dev server inside is reachable from the host (restricted mode)"; else nok "dev server inside reachable from host" "$(cat "$BASE/srv.log")"; fi
+pkill -f "http.server 18181" 2>/dev/null; kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null
+sleep 1
 if pgrep -f "claude-mac-sandbox.*/tinyproxy.conf" >/dev/null 2>&1; then nok "proxy stops when the session ends" "$(pgrep -fl tinyproxy)"; else ok "proxy stops when the session ends"; fi
 endsec
 

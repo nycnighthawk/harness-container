@@ -1,7 +1,11 @@
 # harness-container
 
-Run [Claude Code](https://code.claude.com/docs) in a **rootless Podman** sandbox with your
-project mounted for full development, and a network policy you choose per run.
+Run [Claude Code](https://code.claude.com/docs) sandboxed with your project available for full
+development and a network policy you choose per run:
+
+- **Linux (and Windows via WSL 2):** a **rootless Podman** container, sections 1–6 below.
+- **macOS, for Mac and Xcode projects:** **no containers**: macOS's built-in Seatbelt sandbox
+  confines Claude and everything it runs, natively. See [macOS native sandbox](#macos-native-sandbox).
 
 [![Verify Claude Code sandbox](https://github.com/nycnighthawk/harness-container/actions/workflows/verify-sandbox.yml/badge.svg)](https://github.com/nycnighthawk/harness-container/actions/workflows/verify-sandbox.yml)
 
@@ -125,9 +129,57 @@ for v in claude-config claude-tools; do podman volume create $v; podman volume i
 `claude-config.tar` contains your credentials; store it like a password. Keep the project at the
 same path on the new machine so `--continue` finds its sessions.
 
+## macOS native sandbox
+
+`macos/claude-mac-sandbox.sh` runs Claude Code under `sandbox-exec` (Seatbelt). Claude, `swift`,
+`xcodebuild`, git and every other process it starts run natively with your normal toolchain and
+Xcode, but:
+
+| | Policy |
+|---|---|
+| Writes | only the project, Claude's config (`~/.claude`, `~/.claude.json`), `~/Library/Developer` (DerivedData, simulators), `~/Library/Caches`, SwiftPM state, temp. Not `~/.zshrc`, LaunchAgents, `/usr/local`, other projects, or the Claude binary |
+| Git | `.git/config` and `.git/hooks` read-only (they run code later, outside the sandbox); `--allow-git-config` to lift |
+| Reads | `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc` … denied; add more with `--hide` |
+| Agent / env | ssh-agent socket blocked; your shell environment (tokens etc.) is not passed in |
+| Keychain | usable by default (Claude's login lives there); `--no-keychain` blocks it |
+| Network | `--net full` (default), `restricted` (Seatbelt blocks direct connections; a local tinyproxy allows Claude's hosts + `--allow` lists), `none` |
+
+```bash
+xcode-select --install || true                 # or install Xcode
+curl -fsSL https://claude.ai/install.sh | bash # Claude Code, native installer
+brew install tinyproxy                         # only for --net restricted
+macos/check-macos.sh
+ln -sf "$PWD/macos/claude-mac-sandbox.sh" ~/.local/bin/claude-mac-sandbox
+
+cd ~/code/MyMacApp
+claude-mac-sandbox                     # sign in once (Keychain), then work
+claude-mac-sandbox --continue          # resume: sessions are keyed by the real project path
+claude-mac-sandbox --net restricted --allow dev   # SwiftPM/GitHub allowed, everything else blocked
+claude-mac-sandbox --net none --shell  # offline: swift build / swift test / xcodebuild test
+```
+
+Token or API key instead of the login: store it in the Keychain once
+(`security add-generic-password -U -a "$USER" -s claude-sandbox-oauth-token -w`, or
+`-s claude-sandbox-anthropic-api-key`) and pass `--auth token` / `--auth apikey`; combine with
+`--no-keychain` for the tightest setup.
+
+SwiftPM and Xcode sandbox `Package.swift` evaluation themselves, and macOS refuses nested
+sandboxes, so the launcher puts small `swift`/`xcodebuild` shims first on `PATH` that disable
+only that inner sandbox (the outer one still applies). For the same reason, don't enable Claude
+Code's built-in `/sandbox` inside this launcher; use one or the other. The built-in sandbox is the
+lighter option: it confines only Bash commands, while Claude's own file tools follow its permission
+rules.
+
+`examples/HelloMac` (library, CLI, SwiftUI view, XCTest) and `examples/WithDeps` (SwiftPM
+dependency) are the sample projects the CI builds inside the sandbox.
+
 ## CI verification
 
-`.github/workflows/verify-sandbox.yml` runs on every push/PR (x86_64 and arm64 runners) and weekly:
+`.github/workflows/verify-sandbox.yml` runs on every push/PR and weekly. The macOS jobs (macOS 15
+and 14 runners) run `tests/macos/run-tests.sh`: confinement of writes and reads, Keychain and
+ssh-agent, sign-in wiring, all network modes, `swift build`/`swift test`/`xcodebuild test` of the
+sample project, SwiftPM fetching through the proxy, and per-project sessions. The Linux jobs (x86_64
+and arm64 runners):
 lint → build both images → `tests/run-tests.sh`, which checks prerequisites, image contents,
 mount ownership and two-way visibility, per-project session isolation, persistence across runs,
 image rebuilds and volume backup/restore, hardening, all three network modes (including proxy-bypass
