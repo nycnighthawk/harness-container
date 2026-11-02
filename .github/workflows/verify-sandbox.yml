@@ -22,6 +22,9 @@ jobs:
       - uses: actions/checkout@v5
       - name: shellcheck
         run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh macos/*.sh tests/macos/run-tests.sh macos/shims/* .github/*.sh
+      - name: Guide matches the launchers
+        run: python3 tests/check-guide.py
+
       - name: hadolint
         run: |
           docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Containerfile

@@ -9,6 +9,10 @@ development and a network policy you choose per run:
 
 [![Verify Claude Code sandbox](https://github.com/nycnighthawk/harness-container/actions/workflows/verify-sandbox.yml/badge.svg)](https://github.com/nycnighthawk/harness-container/actions/workflows/verify-sandbox.yml)
 
+**Interactive guide:** [`docs/claude-sandbox-guide.html`](docs/claude-sandbox-guide.html), setup, daily work
+and resuming for both platforms, with a command builder. Download it and open it in a browser.
+CI checks that every command in it matches the launchers.
+
 | File | Purpose |
 |---|---|
 | `Containerfile` | Dev image: Debian + Claude Code (native installer), Node, Python, build tools, non-root `claude` user |
@@ -18,6 +22,10 @@ development and a network policy you choose per run:
 | `allowlist/dev.txt` | GitHub + npm/PyPI/crates/Go/Debian (`--allow dev`) |
 | `check-rootless.sh` | Checks host prerequisites and prints fixes |
 | `tests/run-tests.sh` | End-to-end verification suite (also run in CI) |
+| `macos/claude-mac-sandbox.sh` | macOS launcher: native Seatbelt sandbox, no containers |
+| `macos/check-macos.sh`, `tests/macos/run-tests.sh` | macOS prerequisite checker and test suite |
+| `examples/` | Sample Swift projects built inside the macOS sandbox in CI |
+| `docs/claude-sandbox-guide.html` | Interactive guide; `tests/check-guide.py` keeps it in sync |
 
 ## 1. Set up rootless Podman (once)
 
