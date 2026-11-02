@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: shellcheck
-        run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh
+        run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh macos/*.sh tests/macos/run-tests.sh .github/*.sh
       - name: hadolint
         run: |
           docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Containerfile
@@ -53,3 +53,31 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: .github/ci-step.sh tests/run-tests.sh
+
+  macos:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-14]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Claude Code and tinyproxy
+        run: |
+          .github/ci-step.sh 'curl -fsSL https://claude.ai/install.sh | bash'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          .github/ci-step.sh 'brew install tinyproxy'
+
+      - name: Show environment
+        run: |
+          sw_vers; uname -m; xcodebuild -version || true; swift --version; claude --version
+          /usr/bin/sandbox-exec -p "(version 1)(allow default)" /usr/bin/true && echo "sandbox-exec OK"
+
+      - name: Run macOS verification suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: .github/ci-step.sh /bin/bash tests/macos/run-tests.sh
