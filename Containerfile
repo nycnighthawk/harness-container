@@ -47,7 +47,7 @@ RUN set -eux; \
 # Non-root user (Claude Code refuses --dangerously-skip-permissions as root).
 RUN groupadd -g "${GID}" "${USERNAME}" \
     && useradd -m -u "${UID}" -g "${GID}" -s /bin/bash "${USERNAME}" \
-    && mkdir -p /workspace "/home/${USERNAME}/.claude" "/home/${USERNAME}/.cache" \
+    && mkdir -p /workspace "/home/${USERNAME}/.claude" "/home/${USERNAME}/.cache" "/home/${USERNAME}/.tools" \
     && chown -R "${UID}:${GID}" /workspace "/home/${USERNAME}"
 
 USER ${USERNAME}
@@ -56,15 +56,25 @@ WORKDIR /home/${USERNAME}
 # Claude Code via the official native installer -> ~/.local/bin/claude
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}"
 
-# CLAUDE_CONFIG_DIR keeps all Claude state (settings, .claude.json, .credentials.json)
-# in one directory so one named volume persists your login.
-# npm/pip globals go to the user's home; caches go to ~/.cache (a separate volume).
-ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.npm-global/bin:${PATH}" \
+# Persistent locations (each is a named volume mounted by claude-sandbox.sh):
+#   ~/.claude  CLAUDE_CONFIG_DIR: login, settings, .claude.json, session transcripts
+#   ~/.cache   npm/pip download caches
+#   ~/.tools   user-installed tools (npm -g, pipx, go install, cargo install) + shell history
+# Claude Code itself stays in ~/.local (image layer) so rebuilding updates it.
+ENV TOOLS="/home/${USERNAME}/.tools"
+ENV PATH="/home/${USERNAME}/.local/bin:${TOOLS}/bin:${TOOLS}/npm/bin:${TOOLS}/go/bin:${TOOLS}/cargo/bin:${PATH}" \
     CLAUDE_CONFIG_DIR="/home/${USERNAME}/.claude" \
     DISABLE_AUTOUPDATER=1 \
-    NPM_CONFIG_PREFIX="/home/${USERNAME}/.npm-global" \
+    NPM_CONFIG_PREFIX="${TOOLS}/npm" \
     NPM_CONFIG_CACHE="/home/${USERNAME}/.cache/npm" \
-    PIP_CACHE_DIR="/home/${USERNAME}/.cache/pip"
+    PIP_CACHE_DIR="/home/${USERNAME}/.cache/pip" \
+    PIPX_HOME="${TOOLS}/pipx" \
+    PIPX_BIN_DIR="${TOOLS}/bin" \
+    GOPATH="${TOOLS}/go" \
+    CARGO_HOME="${TOOLS}/cargo" \
+    HISTFILE="${TOOLS}/bash_history"
+RUN printf '%s\n' 'shopt -s histappend' 'HISTSIZE=50000' 'HISTFILESIZE=50000' \
+      'PROMPT_COMMAND="history -a${PROMPT_COMMAND:+;$PROMPT_COMMAND}"' >> "/home/${USERNAME}/.bashrc"
 
 COPY --chmod=0755 sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint
 

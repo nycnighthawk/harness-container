@@ -61,8 +61,9 @@ claude-sandbox --project ../other --ro  # other project, read-only
 claude-sandbox -- -p "fix the failing tests"   # args after -- go to claude
 ```
 
-Files created in the sandbox are owned by **you** on the host (`--userns=keep-id`). Login/settings
-persist in the `claude-config` volume, npm/pip caches in `claude-cache`. The container has no
+The project is mounted at the **same absolute path** inside the container as on the host, so
+Claude's per-directory sessions, trust and memory stay separate per project. Files created in the
+sandbox are owned by **you** on the host (`--userns=keep-id`). The container has no
 capabilities, `no-new-privileges`, no `sudo`, and never sees `~/.ssh` or cloud credentials.
 
 ## 4. Network modes
@@ -90,15 +91,50 @@ exit is the proxy container, which returns 403 for anything not allowlisted. Wat
 Secrets are injected as env vars via `podman secret` and don't appear in `podman inspect`.
 An API key takes precedence over a subscription login; check with `/status`.
 
+## 6. Resume development
+
+Containers are disposable (`--rm`); everything you need to pick up where you left off lives
+outside them:
+
+| What | Where | Survives |
+|---|---|---|
+| Source code, `.venv`, `node_modules`, `CLAUDE.md`, `.claude/` | your project dir on the host | everything |
+| Login, settings, **session transcripts** (`~/.claude/projects/<path>/`) | `claude-config` volume | `--rm`, image rebuilds |
+| `npm -g`, `pipx`, `go install`, `cargo install`, bash history | `claude-tools` volume | `--rm`, image rebuilds |
+| npm/pip download caches | `claude-cache` volume | `--rm`, image rebuilds |
+| Claude Code binary, apt packages | image | rebuild to update |
+
+```bash
+cd ~/code/my-app
+claude-sandbox --continue          # latest conversation for THIS project
+claude-sandbox --resume            # pick an older session for this project
+claude-sandbox --resume my-feature # by name (start one with: claude-sandbox -- --name my-feature)
+```
+
+Because sessions are keyed by the project path, always start from the same directory. If you
+move a project, its old sessions stay under the old path (`--mount-at OLD_PATH` reaches them).
+
+Keep long sessions alive across terminal or SSH disconnects by running the launcher inside
+`tmux` on the host: `tmux new -As my-app 'claude-sandbox --continue'`.
+
+Move to a new machine (or back up):
+```bash
+for v in claude-config claude-tools; do podman volume export $v -o $v.tar; done   # old machine
+for v in claude-config claude-tools; do podman volume create $v; podman volume import $v $v.tar; done  # new
+```
+`claude-config.tar` contains your credentials; store it like a password. Keep the project at the
+same path on the new machine so `--continue` finds its sessions.
+
 ## CI verification
 
 `.github/workflows/verify-sandbox.yml` runs on every push/PR (x86_64 and arm64 runners) and weekly:
 lint → build both images → `tests/run-tests.sh`, which checks prerequisites, image contents,
-mount ownership, volume persistence, hardening, all three network modes (including proxy-bypass
+mount ownership and two-way visibility, per-project session isolation, persistence across runs,
+image rebuilds and volume backup/restore, hardening, all three network modes (including proxy-bypass
 attempts and real git/pip/npm through the allowlist), port publishing, and auth wiring.
 
 To also exercise **real Claude Code sessions** end to end (restricted network, editing the
-mounted project), add either or both repository secrets:
+mounted project, `--resume`/`--continue` across containers and isolation between projects), add either or both repository secrets:
 `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`. Without them those tests are skipped.
 The interactive browser `/login` flow can't be automated in CI; `CLAUDE_CODE_OAUTH_TOKEN`
 covers the subscription path.

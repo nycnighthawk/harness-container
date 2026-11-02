@@ -17,7 +17,12 @@
 #   --allow NAME|FILE   add an allowlist (allowlist/NAME.txt or a path); repeatable
 #   --auth MODE         login (default) | token | apikey   (see README)
 #   -p, --port PORT     publish PORT (or HOST:CONTAINER) on 127.0.0.1 (full mode)
-#   --project DIR       project to mount at /workspace (default: $PWD)
+#   --project DIR       project to mount (default: $PWD). It is mounted at the SAME
+#                       absolute path inside, so Claude's per-directory sessions,
+#                       trust and memory stay separate per project and
+#                       `claude-sandbox --continue` / `--resume` work like on the host.
+#   --mount-at PATH     mount the project at PATH instead (shares sessions with any
+#                       other project mounted at the same PATH)
 #   --ro                mount the project read-only
 #   --gitconfig         mount ~/.gitconfig read-only (author name/email)
 #   --yolo              pass --dangerously-skip-permissions to claude
@@ -25,6 +30,9 @@
 #   --memory SIZE       memory limit (default 8g)   --cpus N (default 4)
 #   --stop-proxies      remove all running allowlist proxies and exit
 #   -h, --help
+#
+# Any other argument goes to claude, e.g.  claude-sandbox --continue
+#                                          claude-sandbox --resume [id|name]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -32,11 +40,12 @@ IMAGE="${IMAGE:-localhost/claude-sandbox:latest}"
 PROXY_IMAGE="${PROXY_IMAGE:-localhost/claude-sandbox-proxy:latest}"
 CONFIG_VOLUME="${CONFIG_VOLUME:-claude-config}"
 CACHE_VOLUME="${CACHE_VOLUME:-claude-cache}"
+TOOLS_VOLUME="${TOOLS_VOLUME:-claude-tools}"
 NET_INTERNAL="claude-internal"
 NET_EGRESS="claude-egress"
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sandbox"
 
-net=full auth=login project="$PWD" ro=0 gitconfig=0 yolo=0 shell=0
+net=full auth=login project="$PWD" mount_at="" ro=0 gitconfig=0 yolo=0 shell=0
 memory=8g cpus=4
 allows=() ports=() passthru=()
 
@@ -50,6 +59,7 @@ while (($#)); do
     --auth)      auth="${2:?}"; shift 2 ;;
     -p|--port)   ports+=("${2:?}"); shift 2 ;;
     --project)   project="$(cd "${2:?}" && pwd)"; shift 2 ;;
+    --mount-at)  mount_at="${2:?}"; shift 2 ;;
     --ro)        ro=1; shift ;;
     --gitconfig) gitconfig=1; shift ;;
     --yolo)      yolo=1; shift ;;
@@ -68,6 +78,18 @@ done
 [[ "$(podman info --format '{{.Host.Security.Rootless}}')" == "true" ]] \
   || die "podman is not running rootless. Run as your normal user (no sudo)."
 
+# ------------------------------------------------------------ project path
+project="$(readlink -f "$project")"
+target="${mount_at:-$project}"
+[[ "$target" == /* ]] || die "--mount-at must be an absolute path"
+[[ "$project" == / || "$project" == "$HOME" ]] && \
+  die "refusing to mount '$project' (your whole home or /). cd into a project directory."
+case "$target/" in
+  /home/claude/|/home/claude/.claude/*|/home/claude/.cache/*|/home/claude/.tools/*|/home/claude/.local/*|\
+  /usr/*|/etc/*|/bin/*|/sbin/*|/lib/*|/lib64/*|/proc/*|/sys/*|/dev/*|/run/*|/var/lib/*|/var/run/*|/boot/*)
+    die "project path '$target' collides with a container system path; use --mount-at /workspace/NAME" ;;
+esac
+
 # ---------------------------------------------------------------- base args
 name="claude-$(basename "$project" | tr -c 'a-zA-Z0-9_.\n' '-')-$$"
 tty=(-i); [[ -t 0 && -t 1 ]] && tty=(-it)   # no -t in CI / pipes
@@ -78,10 +100,13 @@ args=(
   --userns=keep-id:uid=1000,gid=1000
   --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=2048
   --init
-  -w /workspace
+  -w "$target"
   -e TERM="${TERM:-xterm-256color}"
-  -v "$CONFIG_VOLUME":/home/claude/.claude:U
-  -v "$CACHE_VOLUME":/home/claude/.cache:U
+  -e SANDBOX_PROJECT_DIR="$target"
+  # Persistent state (survives --rm and image rebuilds):
+  -v "$CONFIG_VOLUME":/home/claude/.claude:U   # login, settings, session transcripts
+  -v "$CACHE_VOLUME":/home/claude/.cache:U     # npm/pip caches
+  -v "$TOOLS_VOLUME":/home/claude/.tools:U     # npm -g, pipx, go, cargo, bash history
 )
 
 # Resource limits only if the cgroup controllers are delegated to this user.
@@ -90,7 +115,7 @@ controllers="$(podman info --format '{{.Host.CgroupControllers}}' | tr -d '[]' 2
 [[ " $controllers " == *" cpu "* ]]    && args+=(--cpus="$cpus")
 
 # Project mount (:Z = private SELinux label; harmless on non-SELinux hosts).
-if ((ro)); then args+=(-v "$project":/workspace:ro,Z); else args+=(-v "$project":/workspace:Z); fi
+if ((ro)); then args+=(-v "$project":"$target":ro,Z); else args+=(-v "$project":"$target":Z); fi
 ((gitconfig)) && [[ -f "$HOME/.gitconfig" ]] && args+=(-v "$HOME/.gitconfig":/home/claude/.gitconfig:ro,Z)
 
 # -------------------------------------------------------------------- auth

@@ -12,7 +12,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SB="$ROOT/claude-sandbox.sh"
 RUN_ID="t$$"
-export CONFIG_VOLUME="claude-config-$RUN_ID" CACHE_VOLUME="claude-cache-$RUN_ID"
+export CONFIG_VOLUME="claude-config-$RUN_ID" CACHE_VOLUME="claude-cache-$RUN_ID" TOOLS_VOLUME="claude-tools-$RUN_ID"
 PROJ="$(mktemp -d)"; chmod 755 "$PROJ"
 pass=0 fail=0 skip=0 failed=()
 
@@ -37,7 +37,8 @@ expect()    { local n="$1"; shift; local out; if out="$("$@")"; then ok "$n"; el
 expect_no() { local n="$1"; shift; local out; if out="$("$@")"; then nok "$n" "expected failure, got success: $out"; else ok "$n"; fi; }
 
 cleanup() {
-  podman volume rm -f "$CONFIG_VOLUME" "$CACHE_VOLUME" >/dev/null 2>&1
+  podman volume rm -f "$CONFIG_VOLUME" "$CACHE_VOLUME" "$TOOLS_VOLUME" >/dev/null 2>&1
+  rm -rf "${PROJ2:-/nonexistent}"
   podman secret rm anthropic_api_key claude_oauth_token >/dev/null 2>&1
   "$SB" --stop-proxies >/dev/null 2>&1
   [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null
@@ -69,27 +70,27 @@ owner() { stat -c '%u:%g' "$1" 2>/dev/null; }
 
 # 1. host -> container
 echo "from-host" > "$PROJ/host.txt"
-eq "host-created file readable inside" "$(sb -- 'cat /workspace/host.txt')" "from-host"
+eq "host-created file readable inside" "$(sb -- 'cat $SANDBOX_PROJECT_DIR/host.txt')" "from-host"
 
 # 2. container creates a file -> host sees exact content, owned by host user
-sb -- 'printf "line1\nline2\n" > /workspace/new.txt' >/dev/null
+sb -- 'printf "line1\nline2\n" > $SANDBOX_PROJECT_DIR/new.txt' >/dev/null
 eq "new file content visible on host"          "$(cat "$PROJ/new.txt" 2>&1)" $'line1\nline2'
 eq "new file owned by host user ($U:$G)"       "$(owner "$PROJ/new.txt")" "$U:$G"
 eq "new file has normal perms (644)"           "$(stat -c %a "$PROJ/new.txt")" "644"
 
 # 3. container edits a host file in place (sed -i rewrites via temp file + rename)
 printf 'version=1\nname=demo\n' > "$PROJ/config.ini"; chmod 640 "$PROJ/config.ini"
-sb -- 'sed -i "s/version=1/version=2/" /workspace/config.ini && echo "edited=yes" >> /workspace/config.ini' >/dev/null
+sb -- 'sed -i "s/version=1/version=2/" $SANDBOX_PROJECT_DIR/config.ini && echo "edited=yes" >> $SANDBOX_PROJECT_DIR/config.ini' >/dev/null
 eq "in-place edit visible on host"             "$(cat "$PROJ/config.ini")" $'version=2\nname=demo\nedited=yes'
 eq "edited file still owned by host user"      "$(owner "$PROJ/config.ini")" "$U:$G"
 eq "edited file keeps its mode (640)"          "$(stat -c %a "$PROJ/config.ini")" "640"
 
 # 4. host edits after the container wrote -> container sees host's change
 echo "host-update" >> "$PROJ/new.txt"
-eq "host's later edit visible inside"          "$(sb -- 'tail -1 /workspace/new.txt')" "host-update"
+eq "host's later edit visible inside"          "$(sb -- 'tail -1 $SANDBOX_PROJECT_DIR/new.txt')" "host-update"
 
 # 5. directories, rename, delete, exec bit
-sb -- 'mkdir -p /workspace/src/pkg && echo "print(1)" > /workspace/src/pkg/main.py && mv /workspace/new.txt /workspace/renamed.txt && rm /workspace/host.txt && printf "#!/bin/sh\necho ran\n" > /workspace/run.sh && chmod +x /workspace/run.sh' >/dev/null
+sb -- 'mkdir -p $SANDBOX_PROJECT_DIR/src/pkg && echo "print(1)" > $SANDBOX_PROJECT_DIR/src/pkg/main.py && mv $SANDBOX_PROJECT_DIR/new.txt $SANDBOX_PROJECT_DIR/renamed.txt && rm $SANDBOX_PROJECT_DIR/host.txt && printf "#!/bin/sh\necho ran\n" > $SANDBOX_PROJECT_DIR/run.sh && chmod +x $SANDBOX_PROJECT_DIR/run.sh' >/dev/null
 eq "nested dirs owned by host user"            "$(owner "$PROJ/src/pkg")" "$U:$G"
 expect "host can write into dirs made inside"  touch "$PROJ/src/pkg/host-added.py"
 eq "rename visible on host"                    "$( [[ -f "$PROJ/renamed.txt" && ! -e "$PROJ/new.txt" ]] && echo yes)" "yes"
@@ -98,16 +99,16 @@ eq "exec bit set inside works on host"         "$("$PROJ/run.sh" 2>&1)" "ran"
 
 # 6. byte-exact transfer both directions (5 MiB random)
 head -c 5242880 /dev/urandom > "$PROJ/blob-host.bin"
-eq "host binary identical inside (sha256)"     "$(sb -- 'sha256sum < /workspace/blob-host.bin' | cut -d' ' -f1)" "$(sha256sum < "$PROJ/blob-host.bin" | cut -d' ' -f1)"
-inner="$(sb -- 'head -c 5242880 /dev/urandom > /workspace/blob-ctr.bin && sha256sum < /workspace/blob-ctr.bin' | cut -d' ' -f1)"
+eq "host binary identical inside (sha256)"     "$(sb -- 'sha256sum < $SANDBOX_PROJECT_DIR/blob-host.bin' | cut -d' ' -f1)" "$(sha256sum < "$PROJ/blob-host.bin" | cut -d' ' -f1)"
+inner="$(sb -- 'head -c 5242880 /dev/urandom > $SANDBOX_PROJECT_DIR/blob-ctr.bin && sha256sum < $SANDBOX_PROJECT_DIR/blob-ctr.bin' | cut -d' ' -f1)"
 eq "container binary identical on host (sha256)" "$(sha256sum < "$PROJ/blob-ctr.bin" | cut -d' ' -f1)" "$inner"
 
 # 7. a host file only the user can read (600) is accessible inside (keep-id mapping)
 echo "private" > "$PROJ/secret.txt"; chmod 600 "$PROJ/secret.txt"
-eq "mode-600 host file readable+writable inside" "$(sb -- 'echo more >> /workspace/secret.txt && cat /workspace/secret.txt')" $'private\nmore'
+eq "mode-600 host file readable+writable inside" "$(sb -- 'echo more >> $SANDBOX_PROJECT_DIR/secret.txt && cat $SANDBOX_PROJECT_DIR/secret.txt')" $'private\nmore'
 
 # 8. git: commit inside, host git sees it with no 'dubious ownership' error
-sb -- 'cd /workspace && git init -q && git add -A && git -c user.name=sandbox -c user.email=s@example.com commit -qm "commit from sandbox"' >/dev/null
+sb -- 'cd $SANDBOX_PROJECT_DIR && git init -q && git add -A && git -c user.name=sandbox -c user.email=s@example.com commit -qm "commit from sandbox"' >/dev/null
 eq "host git log shows sandbox commit"         "$(git -C "$PROJ" log -1 --format=%s 2>&1)" "commit from sandbox"
 eq "host git status clean (no ownership issues)" "$(git -C "$PROJ" status --porcelain 2>&1 | grep -v host-added || true)" ""
 eq ".git objects owned by host user"           "$(find "$PROJ/.git" ! -user "$U" | head -3)" ""
@@ -118,13 +119,13 @@ live_bg=$!
 cid=""; for _ in $(seq 1 30); do cid="$(podman ps --filter label=claude-sandbox=1 --filter status=running -q | head -1)"; [[ -n "$cid" ]] && break; sleep 1; done
 if [[ -n "$cid" ]]; then
   echo "v1" > "$PROJ/live.txt"
-  eq "live: host write seen by running container"   "$(podman exec "$cid" cat /workspace/live.txt)" "v1"
+  eq "live: host write seen by running container"   "$(podman exec "$cid" cat "$PROJ/live.txt")" "v1"
   echo "v2" > "$PROJ/live.txt"
-  eq "live: host update seen without restart"       "$(podman exec "$cid" cat /workspace/live.txt)" "v2"
-  podman exec "$cid" sh -c 'echo "from-running-container" > /workspace/live-out.txt'
+  eq "live: host update seen without restart"       "$(podman exec "$cid" cat "$PROJ/live.txt")" "v2"
+  podman exec "$cid" sh -c 'echo "from-running-container" > $SANDBOX_PROJECT_DIR/live-out.txt'
   eq "live: container write seen by host immediately" "$(cat "$PROJ/live-out.txt" 2>&1)" "from-running-container"
   eq "live: written as host user"                   "$(owner "$PROJ/live-out.txt")" "$U:$G"
-  podman exec "$cid" sh -c 'for i in 1 2 3; do echo "tick $i" >> /workspace/live-out.txt; done'
+  podman exec "$cid" sh -c 'for i in 1 2 3; do echo "tick $i" >> $SANDBOX_PROJECT_DIR/live-out.txt; done'
   eq "live: appends streamed to host"               "$(tail -1 "$PROJ/live-out.txt")" "tick 3"
   podman rm -f "$cid" >/dev/null 2>&1
 else
@@ -135,7 +136,7 @@ wait "$live_bg" 2>/dev/null
 # 10. host user can clean up everything the sandbox created
 expect    "host user can delete all sandbox-created files" rm -rf "$PROJ/src" "$PROJ/.git" "$PROJ/renamed.txt" "$PROJ/run.sh" "$PROJ/blob-host.bin" "$PROJ/blob-ctr.bin" "$PROJ/secret.txt" "$PROJ/config.ini" "$PROJ/live.txt" "$PROJ/live-out.txt"
 eq        "project dir empty after cleanup" "$(ls -A "$PROJ")" ""
-expect_no "--ro blocks writes"                         sb --ro -- 'touch /workspace/nope'
+expect_no "--ro blocks writes"                         sb --ro -- 'touch $SANDBOX_PROJECT_DIR/nope'
 echo "from-host" > "$PROJ/host.txt"   # used by the port-publishing test
 endsec
 
@@ -143,6 +144,44 @@ section "Persistence across runs (named volumes)"
 expect "write to config volume"        sb -- 'echo persisted > ~/.claude/probe'
 expect "config volume survives --rm"   sb -- 'grep -q persisted ~/.claude/probe'
 expect "cache volume writable"         sb -- 'echo x > ~/.cache/probe && grep -q x ~/.cache/probe'
+endsec
+
+section "Resume: per-project sessions and persistent state"
+PROJ2="$(mktemp -d)"; chmod 755 "$PROJ2"
+eq "project mounted at its host path (cwd inside = $PROJ)" "$(sb -- pwd)" "$PROJ"
+eq "SANDBOX_PROJECT_DIR matches host path"  "$(sb -- 'echo "$SANDBOX_PROJECT_DIR"')" "$PROJ"
+eq "second project gets its own path"       "$("$SB" --project "$PROJ2" --shell -c pwd </dev/null 2>&1)" "$PROJ2"
+eq "--mount-at overrides the mount path"    "$("$SB" --project "$PROJ2" --mount-at /workspace/demo --shell -c pwd </dev/null 2>&1)" "/workspace/demo"
+expect_no "refuses to mount your whole \$HOME" "$SB" --project "$HOME" --shell -c true
+expect_no "refuses system mount paths"         "$SB" --project "$PROJ2" --mount-at /etc/demo --shell -c true
+
+# Claude keys sessions by cwd: ~/.claude/projects/<encoded cwd>/<session>.jsonl.
+# Simulate a transcript in project 1 and check it is visible to project 1 only.
+enc='d="$CLAUDE_CONFIG_DIR/projects/$(pwd | sed "s#[^a-zA-Z0-9]#-#g")"'
+sb -- "$enc"' && mkdir -p "$d" && echo "{}" > "$d/sess-$RANDOM.jsonl"' >/dev/null
+eq "session bucket for project 1 persists across runs" "$(sb -- "$enc"' && ls "$d" | wc -l')" "1"
+eq "project 2 does not see project 1 sessions" "$("$SB" --project "$PROJ2" --shell -c "$enc"' && ls "$d" 2>/dev/null | wc -l' </dev/null 2>&1)" "0"
+"$SB" --project "$PROJ2" --shell -c "$enc"' && mkdir -p "$d" && echo "{}" > "$d/sess-$RANDOM.jsonl"' </dev/null >/dev/null 2>&1
+eq "two projects -> two separate session dirs" "$(sb -- 'ls "$CLAUDE_CONFIG_DIR/projects" | wc -l')" "2"
+eq "project 1 still sees only its own session" "$(sb -- "$enc"' && ls "$d" | wc -l')" "1"
+
+# User-installed tools and shell history persist (tools volume).
+sb -- 'mkdir -p ~/.tools/bin && printf "#!/bin/sh\necho tool-ok\n" > ~/.tools/bin/hello-tool && chmod +x ~/.tools/bin/hello-tool && echo "make test # marker-42" >> "$HISTFILE"' >/dev/null
+eq "tool installed in earlier run is on PATH"  "$(sb -- 'hello-tool')" "tool-ok"
+eq "shell history persists (HISTFILE in tools volume)" "$(sb -- 'grep -c marker-42 "$HISTFILE"')" "1"
+sb --net full -- 'npm install -g --silent semver@7 >/dev/null 2>&1' >/dev/null
+eq "npm -g package persists across runs"       "$(sb -- 'semver 1.2.3')" "1.2.3"
+
+# State survives an image rebuild/upgrade (new image, same volumes).
+printf 'FROM localhost/claude-sandbox:latest\nRUN true\n' | podman build -q -t localhost/claude-sandbox:next -f - . >/dev/null 2>&1
+eq "state survives image rebuild" "$(IMAGE=localhost/claude-sandbox:next "$SB" --project "$PROJ" --shell -c 'cat ~/.claude/probe; hello-tool' </dev/null 2>&1)" $'persisted\ntool-ok'
+podman rmi -f localhost/claude-sandbox:next >/dev/null 2>&1
+
+# Backup -> restore into a fresh volume (moving to a new machine).
+podman volume export "$CONFIG_VOLUME" -o /tmp/claude-config-$RUN_ID.tar
+podman volume create "restored-$RUN_ID" >/dev/null && podman volume import "restored-$RUN_ID" /tmp/claude-config-$RUN_ID.tar
+eq "config volume export/import restores state" "$(CONFIG_VOLUME="restored-$RUN_ID" "$SB" --project "$PROJ" --shell -c 'cat ~/.claude/probe; '"$enc"' && ls "$d" | wc -l' </dev/null 2>&1)" $'persisted\n1'
+podman volume rm -f "restored-$RUN_ID" >/dev/null; rm -f /tmp/claude-config-$RUN_ID.tar
 endsec
 
 section "Hardening"
@@ -162,7 +201,7 @@ section "Network: --net full"
 expect "internet reachable"             sb --net full -- 'curl -sSf --max-time 20 https://example.com -o /dev/null'
 expect "Anthropic API reachable"        sb --net full -- 'c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://api.anthropic.com/v1/models); [ "$c" != 000 ]'
 # Port publishing: dev server inside, curl from host.
-"$SB" --project "$PROJ" --net full -p 18080:8000 --shell -c 'cd /workspace && exec python3 -m http.server 8000 --bind 0.0.0.0' </dev/null >/tmp/srv.log 2>&1 &
+"$SB" --project "$PROJ" --net full -p 18080:8000 --shell -c 'cd $SANDBOX_PROJECT_DIR && exec python3 -m http.server 8000 --bind 0.0.0.0' </dev/null >/tmp/srv.log 2>&1 &
 SERVER_PID=$!
 got=""; for _ in $(seq 1 30); do got="$(curl -s --max-time 2 http://127.0.0.1:18080/host.txt)" && [[ "$got" == from-host ]] && break; sleep 1; done
 if [[ "$got" == from-host ]]; then ok "published port 127.0.0.1:18080 serves project files"; else nok "published port reachable from host" "$(cat /tmp/srv.log)"; fi
@@ -234,6 +273,15 @@ live() { # live NAME AUTH SECRET_NAME VALUE
   if grep -q 'hi from sandbox' "$PROJ/hello.txt" 2>/dev/null && [[ "$(stat -c %u "$PROJ/hello.txt")" == "$(id -u)" ]]; then
     ok "$name: Claude edited the mounted project (file owned by host user)"
   else nok "$name: Claude edited the mounted project" "$out"; fi
+  # Resume: same project continues the conversation; another project can't see it.
+  local sid; sid="$(cat /proc/sys/kernel/random/uuid)"
+  "$SB" --project "$PROJ" --net restricted --auth "$auth" -- -p --session-id "$sid" 'Remember this codeword: PINEAPPLE-42. Reply with just OK.' </dev/null >/dev/null 2>&1
+  out="$("$SB" --project "$PROJ" --net restricted --auth "$auth" -- -p --resume "$sid" 'What codeword did I give you? Reply with only the codeword.' </dev/null 2>&1)"
+  if grep -q 'PINEAPPLE-42' <<<"$out"; then ok "$name: --resume continues the conversation in a new container"; else nok "$name: --resume continues the conversation" "$out"; fi
+  out="$("$SB" --project "$PROJ" --net restricted --auth "$auth" -- -p --continue 'Repeat the codeword once more, only the codeword.' </dev/null 2>&1)"
+  if grep -q 'PINEAPPLE-42' <<<"$out"; then ok "$name: --continue picks up the latest session for this project"; else nok "$name: --continue in same project" "$out"; fi
+  out="$("$SB" --project "$PROJ2" --net restricted --auth "$auth" -- -p --continue 'If I gave you a codeword earlier, reply with it; otherwise reply NONE.' </dev/null 2>&1)"
+  if ! grep -q 'PINEAPPLE-42' <<<"$out"; then ok "$name: other project does not resume this project's session"; else nok "$name: session isolation between projects" "$out"; fi
   podman secret rm "$sname" >/dev/null
 }
 
