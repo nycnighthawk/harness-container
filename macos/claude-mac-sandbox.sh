@@ -23,7 +23,8 @@
 #   --ro                  project is read-only
 #   --allow-write DIR     also allow writes under DIR; repeatable
 #   --hide PATH           also deny reads of PATH; repeatable
-#   --no-keychain         block Keychain access (needs --auth token|apikey to sign in)
+#   --no-keychain         block the Keychain (files and service). Claude's normal login
+#                         lives there, so sign in with --auth token|apikey instead
 #   --allow-git-config    allow writing .git/config and .git/hooks (blocked by default)
 #   --yolo                pass --dangerously-skip-permissions to claude
 #   --shell               start bash instead of claude
@@ -134,7 +135,7 @@ P="$P
 (deny file-read*
   (subpath $(sq "$H/.ssh")) (subpath $(sq "$H/.aws")) (subpath $(sq "$H/.gnupg"))
   (subpath $(sq "$H/.config/gh")) (subpath $(sq "$H/.config/gcloud")) (subpath $(sq "$H/.azure"))
-  (subpath $(sq "$H/.kube")) (subpath $(sq "$H/.docker")) (subpath $(sq "$H/Library/Keychains"))
+  (subpath $(sq "$H/.kube")) (subpath $(sq "$H/.docker"))
   (literal $(sq "$H/.netrc")) (literal $(sq "$H/.git-credentials")) (literal $(sq "$H/.npmrc"))
   (literal $(sq "$H/.pypirc"))"
 if [ ${#hides[@]} -gt 0 ]; then
@@ -150,7 +151,8 @@ if [ -n "${SSH_AUTH_SOCK:-}" ]; then P="$P
 
 if [ "$keychain" = 0 ]; then P="$P
 
-;; ---- Keychain blocked
+;; ---- Keychain blocked (files and the security service)
+(deny file-read* (subpath $(sq "$H/Library/Keychains")) (subpath \"/Library/Keychains\"))
 (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\"))"
 fi
 
@@ -185,7 +187,8 @@ esac
 if [ "$print" = 1 ]; then printf '%s\n' "$P" | sed "s/localhost:$port/localhost:<proxy-port>/"; exit 0; fi
 
 # ------------------------------------------------------------ environment
-envs=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$PATH"
+# Shims make swift/xcodebuild skip their own inner sandbox (nesting is refused).
+envs=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$HERE/shims:$PATH"
       SHELL=/bin/bash TERM="${TERM:-xterm-256color}" LANG="${LANG:-en_US.UTF-8}"
       TMPDIR="${TMPDIR:-/tmp}" DISABLE_AUTOUPDATER=1
       CLAUDE_SANDBOX=macos-seatbelt SANDBOX_PROJECT_DIR="$project")

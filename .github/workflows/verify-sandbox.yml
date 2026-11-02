@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: shellcheck
-        run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh macos/*.sh tests/macos/run-tests.sh .github/*.sh
+        run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh macos/*.sh tests/macos/run-tests.sh macos/shims/* .github/*.sh
       - name: hadolint
         run: |
           docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Containerfile

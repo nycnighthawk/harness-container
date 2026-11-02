@@ -128,7 +128,7 @@ section "Credentials are not readable"
 mkdir -p ~/.ssh ~/.aws; echo "FAKE-KEY" > "$HOME/.ssh/sbx_test_$ID"; echo "FAKE-AWS" > "$HOME/.aws/sbx_test_$ID"
 expect_no "~/.ssh unreadable"                sb -- "cat ~/.ssh/sbx_test_$ID"
 expect_no "~/.aws unreadable"                sb -- "cat ~/.aws/sbx_test_$ID"
-expect_no "Keychain files unreadable"        sb -- 'ls ~/Library/Keychains'
+expect_no "--no-keychain: Keychain files unreadable" sb --no-keychain -- 'ls ~/Library/Keychains'
 echo "hidden" > "$OUT/hide-me.txt"
 expect_no "--hide blocks an extra path"      sb --hide "$OUT/hide-me.txt" -- "cat '$OUT/hide-me.txt'"
 expect    "...readable without --hide"       sb -- "cat '$OUT/hide-me.txt'"
@@ -140,7 +140,7 @@ else skp "ssh-agent test" "could not start an agent on this machine"; fi
 kill "$AGENT_PID" 2>/dev/null; AGENT_PID=""; unset SSH_AUTH_SOCK SSH_AGENT_PID
 if security add-generic-password -U -A -a "$(id -un)" -s "$KC_PROBE" -w probe-value >/dev/null 2>&1 && \
    [ "$(security find-generic-password -s "$KC_PROBE" -w 2>/dev/null)" = probe-value ]; then
-  eq        "Keychain usable by default (normal login works)" "$(sb -- "security find-generic-password -s $KC_PROBE -w")" "probe-value"
+  eq        "Keychain usable by default (normal login works)" "$(sb -- "security find-generic-password -s $KC_PROBE -w 2>&1")" "probe-value"
   expect_no "--no-keychain blocks Keychain access"           sb --no-keychain -- "security find-generic-password -s $KC_PROBE -w"
 else skp "Keychain tests" "login keychain not available to this user"; fi
 endsec
@@ -190,6 +190,7 @@ if xcodebuild -version >/dev/null 2>&1; then
     xcodebuild -scheme "$scheme" -destination "platform=macOS" test 2>&1 | tail -25' </dev/null 2>&1)"
   case "$out" in *"TEST SUCCEEDED"*) ok "xcodebuild test passes (DerivedData in ~/Library/Developer)" ;; *) nok "xcodebuild test passes" "$out" ;; esac
 else skp "xcodebuild test" "full Xcode not selected"; fi
+eq     "swift shim is first on PATH inside"   "$(sb -- 'command -v swift')" "$ROOT/macos/shims/swift"
 cp -R "$ROOT/examples/WithDeps/." "$PROJ/WithDeps/"
 expect_no "SwiftPM can't fetch dependencies without --allow dev" "$SB" --project "$PROJ/WithDeps" --net restricted --shell -c 'set -o pipefail; swift package resolve 2>&1 | tail -5'
 expect "SwiftPM fetches dependencies via --allow dev" "$SB" --project "$PROJ/WithDeps" --net restricted --allow dev --shell -c 'set -o pipefail; swift package resolve 2>&1 | tail -5 && swift build 2>&1 | tail -3'

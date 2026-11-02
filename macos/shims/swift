@@ -1,0 +1,14 @@
+#!/bin/bash
+# Shim used inside claude-mac-sandbox. SwiftPM evaluates Package.swift and
+# plugins in its own Seatbelt sandbox, and macOS refuses a sandbox inside a
+# sandbox. The outer claude-mac-sandbox already confines this process tree, so
+# turn off only SwiftPM's inner sandbox, then run the real swift.
+here="$(cd "$(dirname "$0")" && pwd -P)"
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd: -)"
+real="$(command -v swift)" || { echo "swift not found" >&2; exit 127; }
+case "${1:-}" in
+  build|test|run|package)
+    sub="$1"; shift
+    exec "$real" "$sub" --disable-sandbox "$@" ;;
+esac
+exec "$real" "$@"
