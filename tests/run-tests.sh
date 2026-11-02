@@ -61,17 +61,82 @@ expect "auto-updater disabled"        sb -- '[ "$DISABLE_AUTOUPDATER" = 1 ]'
 expect "CLAUDE_CONFIG_DIR in volume"  sb -- '[ "$CLAUDE_CONFIG_DIR" = /home/claude/.claude ] && [ -w "$CLAUDE_CONFIG_DIR" ]'
 endsec
 
-section "Project mount (rootless keep-id)"
+section "Project mount: writes inside are visible to the host user"
+U="$(id -u)" G="$(id -g)"
+# eq NAME ACTUAL EXPECTED
+eq() { if [[ "$2" == "$3" ]]; then ok "$1"; else nok "$1" "expected: $3"$'\n'"actual:   $2"; fi; }
+owner() { stat -c '%u:%g' "$1" 2>/dev/null; }
+
+# 1. host -> container
 echo "from-host" > "$PROJ/host.txt"
-expect "host file readable in /workspace"  sb -- 'grep -q from-host /workspace/host.txt'
-expect "container can write to project"    sb -- 'echo from-sandbox > /workspace/made-inside.txt && mkdir -p /workspace/sub/dir'
-if [[ -f "$PROJ/made-inside.txt" && "$(stat -c %u "$PROJ/made-inside.txt")" == "$(id -u)" ]]; then
-  ok "files created inside are owned by host user $(id -un) (uid $(id -u))"
+eq "host-created file readable inside" "$(sb -- 'cat /workspace/host.txt')" "from-host"
+
+# 2. container creates a file -> host sees exact content, owned by host user
+sb -- 'printf "line1\nline2\n" > /workspace/new.txt' >/dev/null
+eq "new file content visible on host"          "$(cat "$PROJ/new.txt" 2>&1)" $'line1\nline2'
+eq "new file owned by host user ($U:$G)"       "$(owner "$PROJ/new.txt")" "$U:$G"
+eq "new file has normal perms (644)"           "$(stat -c %a "$PROJ/new.txt")" "644"
+
+# 3. container edits a host file in place (sed -i rewrites via temp file + rename)
+printf 'version=1\nname=demo\n' > "$PROJ/config.ini"; chmod 640 "$PROJ/config.ini"
+sb -- 'sed -i "s/version=1/version=2/" /workspace/config.ini && echo "edited=yes" >> /workspace/config.ini' >/dev/null
+eq "in-place edit visible on host"             "$(cat "$PROJ/config.ini")" $'version=2\nname=demo\nedited=yes'
+eq "edited file still owned by host user"      "$(owner "$PROJ/config.ini")" "$U:$G"
+eq "edited file keeps its mode (640)"          "$(stat -c %a "$PROJ/config.ini")" "640"
+
+# 4. host edits after the container wrote -> container sees host's change
+echo "host-update" >> "$PROJ/new.txt"
+eq "host's later edit visible inside"          "$(sb -- 'tail -1 /workspace/new.txt')" "host-update"
+
+# 5. directories, rename, delete, exec bit
+sb -- 'mkdir -p /workspace/src/pkg && echo "print(1)" > /workspace/src/pkg/main.py && mv /workspace/new.txt /workspace/renamed.txt && rm /workspace/host.txt && printf "#!/bin/sh\necho ran\n" > /workspace/run.sh && chmod +x /workspace/run.sh' >/dev/null
+eq "nested dirs owned by host user"            "$(owner "$PROJ/src/pkg")" "$U:$G"
+expect "host can write into dirs made inside"  touch "$PROJ/src/pkg/host-added.py"
+eq "rename visible on host"                    "$( [[ -f "$PROJ/renamed.txt" && ! -e "$PROJ/new.txt" ]] && echo yes)" "yes"
+eq "delete visible on host"                    "$( [[ ! -e "$PROJ/host.txt" ]] && echo gone)" "gone"
+eq "exec bit set inside works on host"         "$("$PROJ/run.sh" 2>&1)" "ran"
+
+# 6. byte-exact transfer both directions (5 MiB random)
+head -c 5242880 /dev/urandom > "$PROJ/blob-host.bin"
+eq "host binary identical inside (sha256)"     "$(sb -- 'sha256sum < /workspace/blob-host.bin' | cut -d' ' -f1)" "$(sha256sum < "$PROJ/blob-host.bin" | cut -d' ' -f1)"
+inner="$(sb -- 'head -c 5242880 /dev/urandom > /workspace/blob-ctr.bin && sha256sum < /workspace/blob-ctr.bin' | cut -d' ' -f1)"
+eq "container binary identical on host (sha256)" "$(sha256sum < "$PROJ/blob-ctr.bin" | cut -d' ' -f1)" "$inner"
+
+# 7. a host file only the user can read (600) is accessible inside (keep-id mapping)
+echo "private" > "$PROJ/secret.txt"; chmod 600 "$PROJ/secret.txt"
+eq "mode-600 host file readable+writable inside" "$(sb -- 'echo more >> /workspace/secret.txt && cat /workspace/secret.txt')" $'private\nmore'
+
+# 8. git: commit inside, host git sees it with no 'dubious ownership' error
+sb -- 'cd /workspace && git init -q && git add -A && git -c user.name=sandbox -c user.email=s@example.com commit -qm "commit from sandbox"' >/dev/null
+eq "host git log shows sandbox commit"         "$(git -C "$PROJ" log -1 --format=%s 2>&1)" "commit from sandbox"
+eq "host git status clean (no ownership issues)" "$(git -C "$PROJ" status --porcelain 2>&1 | grep -v host-added || true)" ""
+eq ".git objects owned by host user"           "$(find "$PROJ/.git" ! -user "$U" | head -3)" ""
+
+# 9. live: while the container keeps running, changes show up both ways
+"$SB" --project "$PROJ" --net none --shell -c 'sleep 300' </dev/null >/dev/null 2>&1 &
+live_bg=$!
+cid=""; for _ in $(seq 1 30); do cid="$(podman ps --filter label=claude-sandbox=1 --filter status=running -q | head -1)"; [[ -n "$cid" ]] && break; sleep 1; done
+if [[ -n "$cid" ]]; then
+  echo "v1" > "$PROJ/live.txt"
+  eq "live: host write seen by running container"   "$(podman exec "$cid" cat /workspace/live.txt)" "v1"
+  echo "v2" > "$PROJ/live.txt"
+  eq "live: host update seen without restart"       "$(podman exec "$cid" cat /workspace/live.txt)" "v2"
+  podman exec "$cid" sh -c 'echo "from-running-container" > /workspace/live-out.txt'
+  eq "live: container write seen by host immediately" "$(cat "$PROJ/live-out.txt" 2>&1)" "from-running-container"
+  eq "live: written as host user"                   "$(owner "$PROJ/live-out.txt")" "$U:$G"
+  podman exec "$cid" sh -c 'for i in 1 2 3; do echo "tick $i" >> /workspace/live-out.txt; done'
+  eq "live: appends streamed to host"               "$(tail -1 "$PROJ/live-out.txt")" "tick 3"
+  podman rm -f "$cid" >/dev/null 2>&1
 else
-  nok "files created inside are owned by host user" "$(ls -ln "$PROJ")"
+  nok "live: running sandbox container started" "no running container found"
 fi
-expect    "host can edit/delete files created inside" rm -rf "$PROJ/made-inside.txt" "$PROJ/sub"
+wait "$live_bg" 2>/dev/null
+
+# 10. host user can clean up everything the sandbox created
+expect    "host user can delete all sandbox-created files" rm -rf "$PROJ/src" "$PROJ/.git" "$PROJ/renamed.txt" "$PROJ/run.sh" "$PROJ/blob-host.bin" "$PROJ/blob-ctr.bin" "$PROJ/secret.txt" "$PROJ/config.ini" "$PROJ/live.txt" "$PROJ/live-out.txt"
+eq        "project dir empty after cleanup" "$(ls -A "$PROJ")" ""
 expect_no "--ro blocks writes"                         sb --ro -- 'touch /workspace/nope'
+echo "from-host" > "$PROJ/host.txt"   # used by the port-publishing test
 endsec
 
 section "Persistence across runs (named volumes)"
