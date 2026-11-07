@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code in a rootless Podman sandbox: setup and resume guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,600;0,800;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --fog:#E9EEF2; --paper:#FFFFFF; --ink:#14202B; --slate:#4A5A69; --rule:#C5CFD8; --rule-soft:#DCE3E9;
+  --cobalt:#2448B8; --cobalt-soft:#E3E9FA;
+  --open:#1E7F55; --open-soft:#DDF1E7; --gated:#A86A12; --gated-soft:#F7EBD6; --sealed:#A33A3A; --sealed-soft:#F6E0E0;
+  --code-bg:#14202B; --code-ink:#E6EDF3;
+  --sans:"Atkinson Hyperlegible Next","Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Atkinson Hyperlegible Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --gate:var(--open); --gate-soft:var(--open-soft);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+body{margin:0;background:var(--fog);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.55}
+a{color:var(--cobalt)}
+:focus-visible{outline:3px solid var(--cobalt);outline-offset:2px;border-radius:3px}
+code,kbd{font-family:var(--mono);font-size:.92em}
+td code{white-space:nowrap}
+p code,li code,td code,summary code{background:var(--rule-soft);padding:.05em .3em;border-radius:3px}
+h1,h2,h3{line-height:1.15;margin:0}
+.wrap{max-width:1240px;margin:0 auto;padding:0 24px}
+
+/* ---------- top ---------- */
+header.top{padding:40px 0 8px}
+header.top h1{font-size:clamp(2rem,4.2vw,3.1rem);font-weight:800;letter-spacing:-.02em;max-width:18ch}
+header.top p{color:var(--slate);max-width:62ch;margin:.7em 0 0;font-size:1.06rem}
+
+/* ---------- boundary map + builder ---------- */
+.stage{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:22px;margin:28px 0 12px;align-items:start}
+@media (max-width:980px){.stage{grid-template-columns:minmax(0,1fr)}}
+.map{background:var(--paper);border:1.5px solid var(--ink);border-radius:14px;padding:18px;position:relative}
+.map-cap{font-size:.86rem;color:var(--slate);margin:0 0 12px}
+.host{border:1.5px dashed var(--slate);border-radius:10px;padding:14px 14px 16px;position:relative}
+.host>.tag{position:absolute;top:-.75em;left:12px;background:var(--paper);padding:0 6px;font-weight:600;font-size:.88rem}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 84px minmax(0,1.25fr) 84px minmax(0,.8fr);align-items:center;gap:0}
+.node{border:1.5px solid var(--ink);border-radius:8px;padding:10px 11px;background:var(--paper);min-height:96px}
+.node h3{font-size:.95rem;font-weight:800;margin-bottom:4px}
+.node .sub{font-size:.8rem;color:var(--slate);line-height:1.35;word-break:break-word}
+.node.proj{background:var(--fog)}
+.node.box{border-width:2.5px;background:#F5F8FB}
+.node.net{border-style:dotted;text-align:center}
+.link{height:96px;position:relative}
+.link svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.link .lbl{position:absolute;left:50%;transform:translateX(-50%);top:calc(50% - 1.9em);font-size:.72rem;color:var(--slate);white-space:nowrap;background:var(--paper);padding:0 3px}
+.gate{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:58px;padding:6px 2px;border-radius:7px;background:var(--gate-soft);border:2px solid var(--gate);color:var(--gate);font-weight:800;font-size:.72rem;text-align:center;line-height:1.15;transition:background .25s,border-color .25s,color .25s}
+.pill{display:inline-block;font-size:.72rem;font-weight:600;border-radius:99px;padding:1px 7px;margin:4px 4px 0 0;border:1px solid var(--rule);background:var(--paper)}
+.pill.key{border-color:var(--cobalt);color:var(--cobalt)}
+.pill.warn{border-color:var(--sealed);color:var(--sealed)}
+.vols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
+.vol{border:1.5px solid var(--rule);border-radius:8px;padding:8px 10px;font-size:.8rem;line-height:1.35;background:var(--paper);transition:border-color .25s, box-shadow .25s}
+.vol b{display:block;font-family:var(--mono);font-size:.8rem;font-weight:600;margin-bottom:2px}
+.vol.hot{border-color:var(--cobalt);box-shadow:0 0 0 3px var(--cobalt-soft)}
+.map-note{margin:14px 0 0;font-size:.92rem;border-left:4px solid var(--gate);padding:4px 0 4px 10px;transition:border-color .25s}
+@media (max-width:640px){
+  .row{grid-template-columns:minmax(0,1fr);gap:0}
+  .link{height:44px}
+  .link .lbl{bottom:auto;top:50%;left:calc(50% + 46px);transform:translateY(-50%)}
+  .link svg{display:none}
+  .link::before{content:"";position:absolute;left:50%;top:2px;bottom:2px;border-left:2px solid var(--ink)}
+  .link.wire::before{border-left:2.5px solid var(--gate)}
+  .checks{grid-template-columns:1fr}
+  .node{min-height:0}
+  .gate{width:auto;padding:4px 10px}
+  .vols{grid-template-columns:1fr}
+}
+
+.left{display:flex;flex-direction:column;gap:16px;min-width:0}
+.cmdpanel{background:var(--paper);border:1.5px solid var(--rule);border-radius:14px;padding:16px 18px 10px}
+.cmdpanel h2{font-size:1.05rem;font-weight:800;margin:0}
+.cmdpanel .cmd{margin:8px 0 8px}
+#out pre{font-size:.95rem}
+.builder{background:var(--paper);border:1.5px solid var(--rule);border-radius:14px;padding:18px}
+.builder h2{font-size:1.15rem;font-weight:800;margin-bottom:12px}
+fieldset{border:0;padding:0;margin:0 0 14px}
+legend{font-weight:600;font-size:.92rem;margin-bottom:6px;padding:0}
+.seg{display:flex;flex-wrap:wrap;gap:6px}
+.seg label{position:relative}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg span{display:inline-block;border:1.5px solid var(--rule);border-radius:7px;padding:5px 11px;font-size:.9rem;cursor:pointer;background:var(--paper)}
+.seg input:checked+span{border-color:var(--cobalt);background:var(--cobalt-soft);color:var(--cobalt);font-weight:600}
+.seg input:focus-visible+span{outline:3px solid var(--cobalt);outline-offset:2px}
+.seg input:disabled+span{opacity:.45;cursor:not-allowed}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;font-size:.92rem}
+.checks label{display:flex;gap:7px;align-items:flex-start;cursor:pointer}
+.checks input{margin-top:.3em}
+.checks label.off{opacity:.45;cursor:not-allowed}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.9rem;margin-bottom:10px}
+.field input[type=text]{font-family:var(--mono);font-size:.9rem;padding:6px 8px;border:1.5px solid var(--rule);border-radius:6px}
+.field input[type=text]:disabled{background:var(--fog);color:var(--slate)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hint{font-size:.82rem;color:var(--slate);margin:2px 0 0}
+
+/* ---------- code ---------- */
+.cmd{position:relative;margin:10px 0 14px}
+.cmd pre{margin:0;background:var(--code-bg);color:var(--code-ink);border-radius:8px;padding:12px 74px 12px 14px;overflow-x:auto;font-family:var(--mono);font-size:.86rem;line-height:1.55;white-space:pre}
+.cmd pre .c{color:#93A4B5}
+.copy{position:absolute;top:7px;right:7px;font:600 .78rem var(--sans);border:1px solid #5B6B7B;background:#22313F;color:#E6EDF3;border-radius:6px;padding:4px 9px;cursor:pointer}
+.copy:hover{background:#2C3E50}
+.copy.done{background:var(--open);border-color:var(--open)}
+#out pre{white-space:pre-wrap;word-break:normal;overflow-wrap:break-word;min-height:3.2em}
+
+/* ---------- body layout ---------- */
+.layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:40px;margin-top:40px;padding-bottom:80px}
+@media (max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}.toc{position:static!important}}
+.toc{position:sticky;top:18px;align-self:start;font-size:.92rem}
+.toc h2{font-size:.95rem;font-weight:800;margin-bottom:8px}
+.toc ol,.toc ul{list-style:none;margin:0;padding:0}
+.toc a{display:flex;justify-content:space-between;gap:8px;text-decoration:none;color:var(--ink);padding:4px 8px;border-radius:6px}
+.toc a:hover{background:var(--paper)}
+.toc .sub a{padding-left:20px;color:var(--slate)}
+.toc .tick{color:var(--open);font-weight:800}
+.progress{margin:14px 0 6px;height:8px;border-radius:99px;background:var(--rule-soft);overflow:hidden}
+.progress i{display:block;height:100%;width:0;background:var(--open);transition:width .3s}
+.progress-l{font-size:.82rem;color:var(--slate)}
+.reset{font:inherit;font-size:.8rem;background:none;border:0;color:var(--cobalt);padding:0;cursor:pointer;text-decoration:underline}
+
+main section{margin-bottom:56px;max-width:820px}
+main h2{font-size:1.75rem;font-weight:800;letter-spacing:-.01em;margin-bottom:10px;scroll-margin-top:16px}
+main h3{font-size:1.15rem;font-weight:800;margin:26px 0 6px;scroll-margin-top:16px}
+main p,main li{max-width:72ch}
+.lede{color:var(--slate);font-size:1.04rem;margin-top:0}
+
+/* setup steps: a real sequence */
+.steps{list-style:none;margin:20px 0 0;padding:0;counter-reset:s}
+.step{counter-increment:s;position:relative;padding:0 0 26px 58px;border-left:2px solid var(--rule);margin-left:18px}
+.step:last-child{border-left-color:transparent}
+.step::before{content:counter(s);position:absolute;left:-19px;top:-2px;width:36px;height:36px;border-radius:50%;background:var(--paper);border:2px solid var(--ink);display:grid;place-items:center;font-weight:800}
+.step.done::before{content:"✓";background:var(--open);border-color:var(--open);color:#fff}
+.step h3{margin:4px 0 6px}
+.step .opt{font-weight:400;color:var(--slate);font-size:.95rem}
+.done-box{display:inline-flex;gap:7px;align-items:center;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:2px;padding:4px 10px;border:1.5px solid var(--rule);border-radius:7px;background:var(--paper)}
+.step.done .done-box{border-color:var(--open);color:var(--open)}
+
+/* tabs */
+.tabs{margin:10px 0}
+.tablist{display:flex;flex-wrap:wrap;gap:0;border-bottom:1.5px solid var(--rule)}
+.tablist button{font:600 .92rem var(--sans);background:none;border:0;border-bottom:3px solid transparent;margin-bottom:-1.5px;padding:7px 12px;cursor:pointer;color:var(--slate)}
+.tablist button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--cobalt)}
+.tabpanel{padding-top:6px}
+.tabpanel[hidden]{display:none}
+
+/* tables */
+table{border-collapse:collapse;width:100%;font-size:.93rem;margin:12px 0;background:var(--paper);border:1.5px solid var(--rule);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+th{font-weight:800;background:#F3F6F9}
+tr:last-child td{border-bottom:0}
+.tw{overflow-x:auto}
+.dot{display:inline-block;width:.7em;height:.7em;border-radius:50%;margin-right:6px;vertical-align:-.05em}
+
+/* scenarios */
+.scen{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:16px;margin-top:14px}
+@media (max-width:720px){.scen{grid-template-columns:minmax(0,1fr)}}
+.scen-list{display:flex;flex-direction:column;gap:5px}
+.scen-list button{font:inherit;font-size:.94rem;text-align:left;background:var(--paper);border:1.5px solid var(--rule);border-radius:8px;padding:8px 11px;cursor:pointer;color:var(--ink)}
+.scen-list button[aria-pressed=true]{border-color:var(--cobalt);background:var(--cobalt-soft);font-weight:600}
+.scen-body{background:var(--paper);border:1.5px solid var(--rule);border-radius:10px;padding:4px 16px 8px;min-height:100%}
+.scen-body h3{margin-top:12px}
+
+.callout{background:var(--paper);border-left:4px solid var(--gated);padding:10px 14px;border-radius:0 8px 8px 0;margin:14px 0;font-size:.95rem}
+.callout.info{border-left-color:var(--cobalt)}
+details{background:var(--paper);border:1.5px solid var(--rule);border-radius:8px;margin:8px 0;padding:0 14px}
+details[open]{padding-bottom:8px}
+summary{cursor:pointer;font-weight:600;padding:10px 0}
+/* platform switch */
+.platform{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin:22px 0 0}
+.platform .q{font-weight:600}
+.pf{display:inline-flex;border:1.5px solid var(--ink);border-radius:10px;overflow:hidden;background:var(--paper)}
+.pf button{font:600 .98rem var(--sans);border:0;background:none;padding:8px 16px;cursor:pointer;color:var(--ink)}
+.pf button+button{border-left:1.5px solid var(--ink)}
+.pf button[aria-pressed=true]{background:var(--ink);color:#fff}
+.platform .sub{color:var(--slate);font-size:.92rem}
+body[data-platform=mac] .only-linux{display:none!important}
+body[data-platform=linux] .only-mac{display:none!important}
+.vol.no{border-style:dashed;color:var(--sealed);border-color:var(--sealed-soft)}
+footer{color:var(--slate);font-size:.88rem;border-top:1.5px solid var(--rule);padding:20px 0 40px}
+</style>
+</head>
+<body data-platform="linux">
+<div class="wrap">
+
+<header class="top">
+  <h1>Develop with Claude Code inside a sandbox you can always return to</h1>
+  <p>Your project stays on your computer. Claude Code runs confined to that project: in a rootless Podman container on Linux, or in macOS's own Seatbelt sandbox on a Mac, with Xcode and Swift running natively. Conversations and logins are kept outside the sandbox, so tomorrow you continue exactly where you stopped.</p>
+  <div class="platform">
+    <span class="q" id="pf-q">Your computer</span>
+    <div class="pf" role="group" aria-labelledby="pf-q">
+      <button type="button" data-pf="linux" aria-pressed="true">Linux (Podman container)</button>
+      <button type="button" data-pf="mac" aria-pressed="false">macOS (native Seatbelt)</button>
+    </div>
+    <span class="sub" id="pf-sub">Windows: use Linux inside WSL 2.</span>
+  </div>
+</header>
+
+<!-- ================= live boundary map + command builder ================= -->
+<div class="stage" id="top">
+  <div class="left">
+  <div class="map" aria-live="polite">
+    <p class="map-cap">What the sandbox can reach with the options you pick</p>
+    <div class="host">
+      <span class="tag" id="m-host">Your computer (normal user, no sudo)</span>
+      <div class="row">
+        <div class="node proj">
+          <h3>Project folder</h3>
+          <div class="sub" id="m-path">~/code/my-app</div>
+          <div id="m-proj-pills"></div>
+        </div>
+        <div class="link" aria-hidden="true">
+          <svg viewBox="0 0 84 96" preserveAspectRatio="none"><line x1="4" y1="48" x2="80" y2="48" stroke="#14202B" stroke-width="2"/><polygon id="m-arrow-in" points="82,48 73,43 73,53" fill="#14202B"/><polygon id="m-arrow-out" points="2,48 11,43 11,53" fill="#14202B"/></svg>
+          <span class="lbl" id="m-mount">read + write</span>
+        </div>
+        <div class="node box">
+          <h3 id="m-box-title">Sandbox container</h3>
+          <div class="sub" id="m-run">claude, as user <code>claude</code></div>
+          <div id="m-box-pills"></div>
+        </div>
+        <div class="link wire">
+          <svg viewBox="0 0 84 96" preserveAspectRatio="none" aria-hidden="true"><line id="m-wire" x1="2" y1="48" x2="82" y2="48" stroke="#1E7F55" stroke-width="2.5"/></svg>
+          <div class="gate" id="m-gate">Open</div>
+        </div>
+        <div class="node net">
+          <h3>Internet</h3>
+          <div class="sub" id="m-net">Everything</div>
+        </div>
+      </div>
+      <div class="vols" aria-label="Where state is kept">
+        <div class="vol" id="v-config"><b>claude-config</b>Login, settings, session history per project</div>
+        <div class="vol" id="v-tools"><b>claude-tools</b>npm -g, pipx, go, cargo, shell history</div>
+        <div class="vol" id="v-cache"><b>claude-cache</b>npm and pip download caches</div>
+      </div>
+    </div>
+    <p class="map-note" id="m-note">Full network: Claude, package installs and dev servers all work.</p>
+  </div>
+  <div class="cmdpanel">
+    <h2>Your command</h2>
+    <div id="out" class="cmd"><pre id="cmd-text"></pre><button type="button" class="copy" data-copy="#cmd-text">Copy</button></div>
+    <p class="hint" id="cmd-why"></p>
+  </div>
+  </div>
+
+  <form class="builder" id="builder" onsubmit="return false">
+    <h2>Build your launch command</h2>
+    <div class="field">
+      <label for="f-path">Project folder</label>
+      <input type="text" id="f-path" value="~/code/my-app" spellcheck="false" autocomplete="off">
+    </div>
+    <fieldset>
+      <legend>Session</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="sess" value="new" checked><span>Start new</span></label>
+        <label><input type="radio" name="sess" value="continue"><span>Continue latest</span></label>
+        <label><input type="radio" name="sess" value="pick"><span>Pick from list</span></label>
+        <label><input type="radio" name="sess" value="name"><span>Resume by name</span></label>
+        <label><input type="radio" name="sess" value="shell"><span>Shell only</span></label>
+      </div>
+      <div class="field" style="margin-top:8px">
+        <label for="f-name" id="f-name-l">Name this session (optional)</label>
+        <input type="text" id="f-name" placeholder="auth-refactor" spellcheck="false" autocomplete="off">
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Network</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="net" value="full" checked><span>Full</span></label>
+        <label><input type="radio" name="net" value="restricted"><span>Allowlist</span></label>
+        <label><input type="radio" name="net" value="none"><span>None</span></label>
+      </div>
+      <div class="checks" style="margin-top:8px">
+        <label id="l-dev"><input type="checkbox" id="f-dev"> Allow GitHub and package registries</label>
+        <div class="field only-linux" style="margin:0"><label for="f-ports" class="hint" style="margin:0">Publish ports</label><input type="text" id="f-ports" placeholder="3000 8080:80" spellcheck="false" autocomplete="off"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Sign-in</legend>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="auth" value="login" checked><span>Subscription login</span></label>
+        <label><input type="radio" name="auth" value="token"><span>Subscription token</span></label>
+        <label><input type="radio" name="auth" value="apikey"><span>API key</span></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Options</legend>
+      <div class="checks">
+        <label><input type="checkbox" id="f-yolo"> Skip permission prompts</label>
+        <label><input type="checkbox" id="f-ro"> Project read-only</label>
+        <label class="only-linux"><input type="checkbox" id="f-git"> Use my git name and email</label>
+        <label class="only-mac" id="l-nokc"><input type="checkbox" id="f-nokc"> Block the Keychain</label>
+        <label class="only-mac"><input type="checkbox" id="f-gitcfg"> Allow git config and hooks edits</label>
+        <label><input type="checkbox" id="f-tmux"> Keep running in tmux</label>
+      </div>
+    </fieldset>
+    <p class="hint">The map and the command update as you choose. Your choices are remembered in this browser.</p>
+  </form>
+</div>
+
+<!-- ================= body ================= -->
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#setup">One-time setup</a>
+        <ul class="sub" id="toc-steps"></ul>
+      </li>
+      <li><a href="#daily">Daily work</a></li>
+      <li><a href="#resume">Resuming work</a></li>
+      <li><a href="#network">Network modes</a></li>
+      <li><a href="#verify">Verify it works</a></li>
+      <li><a href="#trouble">Troubleshooting</a></li>
+    </ol>
+    <div class="progress" aria-hidden="true"><i id="prog"></i></div>
+    <div class="progress-l"><span id="prog-l">0 of 7 setup steps done</span><br><button class="reset" id="reset" type="button">Reset</button></div>
+  </nav>
+
+  <main>
+    <!-- ---------------- setup ---------------- -->
+    <section id="setup">
+      <h2>One-time setup</h2>
+      <p class="lede">Do these once per computer, in order. Tick each step as you finish; your progress is remembered in this browser.</p>
+      <ol class="steps only-linux" id="steps" data-pf="linux">
+
+        <li class="step" id="s-install" data-title="Install Podman">
+          <h3>Install Podman</h3>
+          <p>You need Podman 4.3 or newer, run as your normal user. Never put <code>sudo</code> in front of <code>podman</code> for this setup: that would make the containers rootful.</p>
+          <div class="tabs" data-tabs>
+            <div class="tablist" role="tablist">
+              <button role="tab" aria-selected="true">Fedora / RHEL</button>
+              <button role="tab" aria-selected="false">Ubuntu / Debian</button>
+              <button role="tab" aria-selected="false">Windows</button>
+              <button role="tab" aria-selected="false">macOS</button>
+            </div>
+            <div class="tabpanel" role="tabpanel">
+              <div class="cmd"><pre>sudo dnf install -y podman git</pre><button class="copy" type="button">Copy</button></div>
+              <p>Fedora 38+ and RHEL 9 are ready for rootless use out of the box, including SELinux labelling.</p>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <div class="cmd"><pre>sudo apt update
+sudo apt install -y podman uidmap passt netavark aardvark-dns \
+  fuse-overlayfs dbus-user-session git</pre><button class="copy" type="button">Copy</button></div>
+              <p>Use Ubuntu 24.04+ or Debian 12+. Ubuntu 22.04 ships Podman 3.4, which is too old. <code>netavark</code> and <code>aardvark-dns</code> are what let the allowlist network mode find its proxy by name.</p>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>Install WSL 2 with Ubuntu 24.04, open the Ubuntu terminal, and follow the Ubuntu / Debian tab from there. Keep projects inside the Linux file system (for example <code>~/code</code>), not under <code>/mnt/c</code>, for speed and correct file ownership.</p>
+              <div class="cmd"><pre>wsl --install -d Ubuntu-24.04</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>The launcher and tests are written for a Linux host and are verified on Linux only. On a Mac, run them inside a Linux virtual machine such as Lima or UTM with Ubuntu 24.04, then follow the Ubuntu / Debian tab inside it.</p>
+              <div class="cmd"><pre>brew install lima
+limactl start --name=dev template://ubuntu-lts
+limactl shell dev</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+          </div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-ids" data-title="Give your user ID ranges">
+          <h3>Give your user subordinate ID ranges</h3>
+          <p>Rootless containers borrow a private range of user and group IDs that belong to you. Check you have one; most installers add it automatically.</p>
+          <div class="cmd"><pre>grep "^$USER:" /etc/subuid /etc/subgid</pre><button class="copy" type="button">Copy</button></div>
+          <p>If either file prints nothing, add a range and let Podman pick it up:</p>
+          <div class="cmd"><pre>sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+podman system migrate</pre><button class="copy" type="button">Copy</button></div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-limits" data-title="Allow resource limits">
+          <h3>Allow memory and CPU limits <span class="opt">(optional)</span></h3>
+          <p>The launcher caps the sandbox at 8 GB and 4 CPUs when your user is allowed to set limits. Without this step it still runs, just without caps.</p>
+          <div class="cmd"><pre>sudo mkdir -p /etc/systemd/system/user@.service.d
+printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | \
+  sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+sudo systemctl daemon-reload</pre><button class="copy" type="button">Copy</button></div>
+          <p>Log out and back in afterwards.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-kit" data-title="Get the kit and check">
+          <h3>Get the sandbox kit and check your machine</h3>
+          <div class="cmd"><pre>git clone https://github.com/nycnighthawk/harness-container.git \
+  ~/harness-container
+cd ~/harness-container
+git checkout ci/verify-sandbox   <span class="c"># until pull request #1 is merged into main</span>
+./check-rootless.sh</pre><button class="copy" type="button">Copy</button></div>
+          <p>The checker prints a PASS, WARN or FAIL line per requirement, with the exact fix for anything that fails. WARN lines about resource limits are fine if you skipped the previous step.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-build" data-title="Build the images">
+          <h3>Build the images and put the launcher on your PATH</h3>
+          <div class="cmd"><pre>podman build -t claude-sandbox .
+podman build -t claude-sandbox-proxy proxy/
+mkdir -p ~/.local/bin
+ln -sf "$PWD/claude-sandbox.sh" ~/.local/bin/claude-sandbox</pre><button class="copy" type="button">Copy</button></div>
+          <p>The image has Claude Code, Node 22, Python 3 with venv and pipx, git, ripgrep, and C build tools. Add what your projects need at build time:</p>
+          <div class="cmd"><pre>podman build -t claude-sandbox --build-arg NODE_MAJOR=20 \
+  --build-arg EXTRA_APT="golang postgresql-client" .</pre><button class="copy" type="button">Copy</button></div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-auth" data-title="Sign in once">
+          <h3>Sign in once</h3>
+          <p>Pick one. Don't set up both a subscription and an API key: the key wins and you'd be billed per token.</p>
+          <div class="tabs" data-tabs>
+            <div class="tablist" role="tablist">
+              <button role="tab" aria-selected="true">Subscription login</button>
+              <button role="tab" aria-selected="false">Subscription token</button>
+              <button role="tab" aria-selected="false">API key</button>
+            </div>
+            <div class="tabpanel" role="tabpanel">
+              <p>For Pro, Max, Team or Enterprise. Start the sandbox from any project, choose the Claude account login, open the link it prints, sign in, and paste the code back at <code>Paste code here if prompted</code>.</p>
+              <div class="cmd"><pre>cd ~/code/my-app && claude-sandbox</pre><button class="copy" type="button">Copy</button></div>
+              <p>The login is stored in the <code>claude-config</code> volume, so every later run and every project is already signed in.</p>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>A one-year subscription token, good for scripts and headless machines. It only makes model requests: claude.ai connectors and Remote Control need the normal login.</p>
+              <div class="cmd"><pre>claude-sandbox setup-token                       <span class="c"># prints the token after browser approval</span>
+printf '%s' 'sk-ant-oat01-…' | podman secret create claude_oauth_token -
+claude-sandbox --auth token</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>Pay-as-you-go with a key from the Claude Console. Approve the key the first time Claude asks; the choice is remembered.</p>
+              <div class="cmd"><pre>printf '%s' 'sk-ant-api03-…' | podman secret create anthropic_api_key -
+claude-sandbox --auth apikey</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+          </div>
+          <p>Secrets are mounted as files readable only by the sandbox user and loaded when Claude starts; they never show up in <code>podman inspect</code>. Inside Claude, <code>/status</code> shows which sign-in is active.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="s-keep" data-title="Keep history longer">
+          <h3>Keep conversation history longer than 30 days</h3>
+          <p>Claude Code deletes transcripts older than 30 days by default, and a deleted conversation can't be resumed. Raise the limit once; it is saved in the config volume.</p>
+          <div class="cmd"><pre>claude-sandbox --net none --shell -c \
+  'f=~/.claude/settings.json; [ -f "$f" ] || echo "{}" > "$f";
+   jq ".cleanupPeriodDays = 365" "$f" > "$f.tmp" && mv "$f.tmp" "$f" && cat "$f"'</pre><button class="copy" type="button">Copy</button></div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+      </ol>
+      <ol class="steps only-mac" id="steps-mac" data-pf="mac">
+        <li class="step" id="m-xcode" data-title="Install Xcode tools">
+          <h3>Install Xcode or the Command Line Tools</h3>
+          <p>Swift packages build with the Command Line Tools alone. For <code>xcodebuild</code>, Xcode projects and simulators, install Xcode from the App Store and select it.</p>
+          <div class="cmd"><pre>xcode-select --install                               <span class="c"># Command Line Tools</span>
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer   <span class="c"># after installing Xcode</span></pre><button class="copy" type="button">Copy</button></div>
+          <p>macOS 13 Ventura or newer. Nothing else is needed for the sandbox itself: Seatbelt is part of macOS.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-claude" data-title="Install Claude Code">
+          <h3>Install Claude Code natively</h3>
+          <div class="cmd"><pre>curl -fsSL https://claude.ai/install.sh | bash
+claude --version</pre><button class="copy" type="button">Copy</button></div>
+          <p>Open a new terminal if <code>claude</code> isn't found. Inside the sandbox Claude can't update itself (it can't write to its own install folder), so run <code>claude update</code> in a normal terminal now and then.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-proxy" data-title="Install the allowlist proxy">
+          <h3>Install the allowlist proxy <span class="opt">(optional)</span></h3>
+          <p>Only needed for allowlist network mode. The launcher starts it on a random local port for each session and stops it when the session ends.</p>
+          <div class="cmd"><pre>brew install tinyproxy</pre><button class="copy" type="button">Copy</button></div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-kit" data-title="Get the kit and check">
+          <h3>Get the sandbox kit and check your Mac</h3>
+          <div class="cmd"><pre>git clone https://github.com/nycnighthawk/harness-container.git \
+  ~/harness-container
+cd ~/harness-container
+git checkout ci/verify-sandbox   <span class="c"># until pull request #1 is merged into main</span>
+macos/check-macos.sh</pre><button class="copy" type="button">Copy</button></div>
+          <p>The checker confirms that Seatbelt actually blocks a denied write, and checks your macOS version, Xcode tools, Claude Code and the proxy. It prints the fix for anything missing.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-path" data-title="Put the launcher on PATH">
+          <h3>Put the launcher on your PATH</h3>
+          <div class="cmd"><pre>mkdir -p ~/.local/bin
+ln -sf ~/harness-container/macos/claude-mac-sandbox.sh ~/.local/bin/claude-mac-sandbox</pre><button class="copy" type="button">Copy</button></div>
+          <p>Nothing to build: Claude, Swift and Xcode run as they are, just confined.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-auth" data-title="Sign in once">
+          <h3>Sign in once</h3>
+          <p>Pick one. Don't set up both a subscription and an API key: the key wins and you'd be billed per token.</p>
+          <div class="tabs" data-tabs>
+            <div class="tablist" role="tablist">
+              <button role="tab" aria-selected="true">Subscription login</button>
+              <button role="tab" aria-selected="false">Subscription token</button>
+              <button role="tab" aria-selected="false">API key</button>
+            </div>
+            <div class="tabpanel" role="tabpanel">
+              <p>For Pro, Max, Team or Enterprise. Start the sandbox in a project and log in; your browser opens normally. The login is kept in your Keychain and shared with Claude outside the sandbox, so if you already use Claude Code on this Mac you're signed in.</p>
+              <div class="cmd"><pre>cd ~/code/MyMacApp && claude-mac-sandbox</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>A one-year subscription token, kept in your Keychain. The launcher reads it outside the sandbox and hands it to Claude, so this also works with the Keychain blocked.</p>
+              <div class="cmd"><pre>claude setup-token        <span class="c"># prints the token after browser approval</span>
+security add-generic-password -U -a "$USER" -s claude-sandbox-oauth-token -w
+<span class="c"># paste the token when prompted</span>
+claude-mac-sandbox --auth token</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+            <div class="tabpanel" role="tabpanel" hidden>
+              <p>Pay-as-you-go with a key from the Claude Console, kept in your Keychain.</p>
+              <div class="cmd"><pre>security add-generic-password -U -a "$USER" -s claude-sandbox-anthropic-api-key -w
+<span class="c"># paste the key when prompted</span>
+claude-mac-sandbox --auth apikey</pre><button class="copy" type="button">Copy</button></div>
+            </div>
+          </div>
+          <p>For the tightest setup, use a token or key together with <b>Block the Keychain</b> (<code>--no-keychain</code>): nothing inside the sandbox can then reach any Keychain item.</p>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+
+        <li class="step" id="m-keep" data-title="Keep history longer">
+          <h3>Keep conversation history longer than 30 days</h3>
+          <p>Claude Code deletes transcripts older than 30 days by default, and a deleted conversation can't be resumed. Raise the limit once, in a normal terminal:</p>
+          <div class="cmd"><pre>mkdir -p ~/.claude && python3 -c 'import json,os
+p=os.path.expanduser("~/.claude/settings.json")
+d=json.load(open(p)) if os.path.exists(p) else {}
+d["cleanupPeriodDays"]=365; json.dump(d,open(p,"w"),indent=2); print(d)'</pre><button class="copy" type="button">Copy</button></div>
+          <label class="done-box"><input type="checkbox" data-step> Done</label>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ---------------- daily ---------------- -->
+    <section id="daily">
+      <h2>Daily work</h2>
+      <div class="only-linux">
+      <p class="lede">Always start the sandbox from the project folder. The launcher mounts that folder at the same path inside the container, which is what keeps each project's conversations separate.</p>
+      <div class="cmd"><pre>cd ~/code/my-app
+claude-sandbox -n auth-refactor     <span class="c"># new, named session</span>
+claude-sandbox --yolo               <span class="c"># no permission prompts; contained to this project</span>
+claude-sandbox --shell              <span class="c"># bash in the same environment: run tests, git, installs</span>
+claude-sandbox -p 3000              <span class="c"># dev server at http://127.0.0.1:3000 (bind 0.0.0.0 inside)</span>
+claude-sandbox -- -p "fix the failing tests"   <span class="c"># after --, arguments go to claude</span></pre><button class="copy" type="button">Copy</button></div>
+      <p>Files Claude creates or edits are owned by you, appear on your computer immediately, and your editor, git client and file manager work on them as usual. Run several projects at once in separate terminals; each gets its own container.</p>
+      <div class="callout"><b>-p means "publish port" to the launcher.</b> To pass Claude's own print flag, put it after <code>--</code>, as in the last line above.</div>
+      <h3>What can and can't reach your computer</h3>
+      <div class="tw"><table>
+        <tr><th>Inside the sandbox</th><th>Not available inside</th></tr>
+        <tr><td>Your project folder, read-write (or read-only with <code>--ro</code>)<br>The three volumes below<br>Your <code>~/.gitconfig</code>, read-only, if you pass <code>--gitconfig</code></td>
+            <td>The rest of your home folder, <code>~/.ssh</code>, cloud credentials, other projects<br>Root access, <code>sudo</code>, Linux capabilities<br>Anything on the network that the chosen mode blocks</td></tr>
+      </table></div>
+      <p>Push to GitHub from the sandbox over HTTPS with a token scoped to the repository, or push from your normal terminal; the files are the same.</p>
+          </div>
+      <div class="only-mac">
+      <p class="lede">Start the sandbox from the project folder. Your project isn't copied or mounted: Claude edits it in place, and Xcode, your editor and git see every change immediately.</p>
+      <div class="cmd"><pre>cd ~/code/MyMacApp
+claude-mac-sandbox -n settings-window   <span class="c"># new, named session</span>
+claude-mac-sandbox --yolo               <span class="c"># no permission prompts; still confined</span>
+claude-mac-sandbox --shell              <span class="c"># bash with the same limits: build, test, git</span>
+claude-mac-sandbox -p "fix the failing tests"   <span class="c"># any other argument goes to claude</span></pre><button class="copy" type="button">Copy</button></div>
+      <h3>Build and test inside the sandbox</h3>
+      <p>Claude runs these itself when you ask it to build or test; you can run them in <code>--shell</code> too.</p>
+      <div class="cmd"><pre>swift build && swift test
+xcodebuild -scheme MyMacApp -destination 'platform=macOS' test
+xcodebuild -list                        <span class="c"># see the scheme names</span></pre><button class="copy" type="button">Copy</button></div>
+      <p>SwiftPM and Xcode normally evaluate <code>Package.swift</code> in a sandbox of their own, and macOS doesn't allow a sandbox inside a sandbox. The launcher puts small <code>swift</code> and <code>xcodebuild</code> wrappers first on the PATH that switch off only that inner sandbox; everything still runs inside the outer one. Call <code>swift</code> and <code>xcodebuild</code> directly, not through <code>xcrun</code>, so the wrappers apply.</p>
+      <p>Keep building and running the app from Xcode as usual: Xcode itself runs outside the sandbox. A dev server Claude starts inside is reachable from your browser with full or allowlist networking.</p>
+      <div class="callout info">Verified in CI on macOS 14 and 15: <code>swift build</code>, <code>swift test</code> and <code>xcodebuild test</code> of a sample project with a SwiftUI view, and fetching SwiftPM dependencies through the allowlist. iOS simulators and code signing with your developer certificates aren't covered by the tests yet; signing needs the Keychain, so don't block it for those.</div>
+      <h3>What the sandbox allows</h3>
+      <div class="tw"><table>
+        <tr><th>Allowed inside</th><th>Blocked inside</th></tr>
+        <tr><td>Read and write the project folder (or read-only with <code>--ro</code>)<br>Write <code>~/.claude</code>, <code>~/.claude.json</code>, <code>~/Library/Developer</code> (DerivedData, simulators), <code>~/Library/Caches</code>, SwiftPM state and temp folders<br>Read the rest of the disk, your git config, Xcode and SDKs<br>The Keychain, unless you block it</td>
+            <td>Writing anywhere else: <code>~/.zshrc</code>, LaunchAgents, <code>/usr/local</code>, other projects, the Claude Code binary<br>Changing <code>.git/config</code> or <code>.git/hooks</code> (they run code later, outside the sandbox)<br>Reading <code>~/.ssh</code>, <code>~/.aws</code>, <code>~/.gnupg</code>, <code>~/.config/gh</code>, <code>~/.kube</code>, <code>~/.docker</code>, <code>~/.netrc</code>, <code>~/.npmrc</code><br>Your ssh-agent, and tokens in your shell environment</td></tr>
+      </table></div>
+      <p>Need more? <code>--allow-write ~/some/dir</code> adds a writable folder, <code>--hide ~/private</code> blocks reading one, and <code>--allow-git-config</code> allows <code>git init</code>, <code>git config</code> and hook changes for that run. Run <code>claude-mac-sandbox --print-profile</code> to see the exact rules.</p>
+      <div class="callout">Seatbelt (<code>sandbox-exec</code>) is marked deprecated by Apple but is what Claude Code's own sandbox, SwiftPM and Xcode use today. The test suite runs on every push and weekly to catch changes in new macOS versions.</div>
+      <h3>Lighter option: Claude Code's built-in sandbox</h3>
+      <p>Claude Code has its own Seatbelt sandbox: run <code>/sandbox</code> inside Claude, or add this to <code>~/.claude/settings.json</code>. It confines the commands Claude runs, while Claude's own file reads and edits follow its permission rules instead. Use it <em>or</em> <code>claude-mac-sandbox</code>, not both: the built-in one can't start inside the launcher.</p>
+      <div class="cmd"><pre>{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": { "allowWrite": ["~/Library/Developer", "~/Library/Caches"] },
+    "network": { "allowedDomains": ["github.com", "api.github.com", "swiftpackageindex.com"] }
+  }
+}</pre><button class="copy" type="button">Copy</button></div>
+      <p class="hint">This exact snippet is checked with <code>claude doctor</code> in CI. See the <a href="https://code.claude.com/docs/en/sandboxing">sandboxing docs</a> for every option.</p>
+      </div>
+    </section>
+
+    <!-- ---------------- resume ---------------- -->
+    <section id="resume">
+      <h2>Resuming work</h2>
+      <p class="lede only-linux">The container is thrown away each time. Nothing you need lives in it, so stopping is always safe.</p>
+      <p class="lede only-mac">The sandbox is only a set of rules applied when you start it. Nothing is stored in it, so stopping is always safe, and conversations are the same ones Claude uses outside the sandbox.</p>
+      <div class="tw only-linux"><table>
+        <tr><th>What</th><th>Kept in</th><th>Survives</th></tr>
+        <tr><td>Source code, <code>.venv</code>, <code>node_modules</code>, <code>CLAUDE.md</code>, project <code>.claude/</code> settings</td><td>Your project folder</td><td>Everything</td></tr>
+        <tr><td>Login, settings, conversation history for each project</td><td><code>claude-config</code> volume</td><td>Exits, reboots, image rebuilds</td></tr>
+        <tr><td><code>npm -g</code>, <code>pipx</code>, <code>go install</code>, <code>cargo install</code> tools, bash history</td><td><code>claude-tools</code> volume</td><td>Exits, reboots, image rebuilds</td></tr>
+        <tr><td>Package download caches</td><td><code>claude-cache</code> volume</td><td>Exits, reboots, image rebuilds</td></tr>
+        <tr><td>Claude Code itself, system packages</td><td>The image</td><td>Replaced when you rebuild</td></tr>
+      </table></div>
+
+      <div class="tw only-mac"><table>
+        <tr><th>What</th><th>Kept in</th><th>Survives</th></tr>
+        <tr><td>Source code, <code>.build</code>, <code>CLAUDE.md</code>, project <code>.claude/</code> settings</td><td>Your project folder</td><td>Everything</td></tr>
+        <tr><td>Conversation history for each project, settings</td><td><code>~/.claude</code> and <code>~/.claude.json</code></td><td>Everything; shared with Claude outside the sandbox</td></tr>
+        <tr><td>Subscription login, token or API key</td><td>Your Keychain</td><td>Everything</td></tr>
+        <tr><td>Build products, indexes, simulators</td><td><code>~/Library/Developer</code></td><td>Everything</td></tr>
+        <tr><td>Claude Code itself</td><td><code>~/.local</code></td><td>Updated by <code>claude update</code> outside the sandbox</td></tr>
+      </table></div>
+
+      <h3>Commands</h3>
+      <p class="only-mac">Conversations are filed under the project's real path, exactly as when you run Claude without the sandbox.</p>
+      <div class="tw"><table>
+        <tr><th>Run from the project folder</th><th>What it does</th></tr>
+        <tr><td><code class="cmdn">claude-sandbox --continue</code></td><td>Reopens the most recent conversation for this folder</td></tr>
+        <tr><td><code class="cmdn">claude-sandbox --resume</code></td><td>Lists this folder's conversations to pick from (<kbd>Ctrl</kbd>+<kbd>A</kbd> widens to all projects)</td></tr>
+        <tr><td><code class="cmdn">claude-sandbox --resume auth-refactor</code></td><td>Resumes a named conversation directly</td></tr>
+        <tr><td><code class="cmdn">claude-sandbox --resume &lt;session-id&gt;</code></td><td>Resumes by ID; works even from a different folder</td></tr>
+        <tr><td><code class="cmdn">claude-sandbox --continue --fork-session</code></td><td>Copies the conversation so you can try another approach and keep the original</td></tr>
+        <tr><td><code>/rename</code>, <code>/resume</code> (inside Claude)</td><td>Name the current conversation; switch to another without restarting</td></tr>
+      </table></div>
+
+      <h3>Pick what happened</h3>
+      <div class="scen">
+        <div class="scen-list" id="scen-list"></div>
+        <div class="scen-body" id="scen-body" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- ---------------- network ---------------- -->
+    <section id="network">
+      <h2>Network modes</h2>
+      <p class="lede">Choose per run with <code>--net</code>. The mode only affects that container.</p>
+      <div class="tw"><table>
+        <tr><th>Mode</th><th>Reachable</th><th>Use it for</th></tr>
+        <tr><td><span class="dot" style="background:var(--open)"></span><code>--net full</code> (default)</td><td>Everything</td><td>Normal development, installs, dev servers<span class="only-linux"> with <code>-p</code></span></td></tr>
+        <tr><td><span class="dot" style="background:var(--gated)"></span><code>--net restricted</code></td><td>Only Claude's own services, through an allowlist proxy</td><td>Repositories you don't fully trust; stopping data from leaving</td></tr>
+        <tr><td><span class="dot" style="background:var(--gated)"></span><code>--net restricted --allow dev</code></td><td>Claude, plus GitHub, npm, PyPI, crates.io, Go modules, Debian</td><td>Allowlisted, but <code>git clone</code>, SwiftPM, <code>pip</code> and <code>npm</code> still work</td></tr>
+        <tr><td><span class="dot" style="background:var(--sealed)"></span><code>--net none</code></td><td>Nothing</td><td>Offline builds and tests with <code>--shell</code>; Claude itself can't run without its API</td></tr>
+      </table></div>
+      <p class="only-linux">In allowlist mode the container sits on an internal network with no route out. Its only exit is a small proxy that refuses every host not on the list, so tools that ignore proxy settings simply fail instead of leaking.</p>
+      <p class="only-mac">In allowlist mode Seatbelt blocks every outgoing connection except one: a tinyproxy the launcher starts on a random local port for that session. The proxy refuses every host not on the list, so tools that ignore proxy settings simply fail instead of leaking. The proxy stops when the session ends; its log path is printed at start. <code>--net none</code> blocks outgoing connections entirely, while local services such as name lookup keep working.</p>
+      <h3>Allow another host</h3>
+      <p>Write one regular expression per line and pass the file. Lists are combined, and no rebuild is needed.</p>
+      <div class="cmd"><pre>printf '%s\n' '^api\.mycompany\.com$' '^(.*\.)?sentry\.io$' > ~/allow-myapp.txt
+claude-sandbox --net restricted --allow dev --allow ~/allow-myapp.txt
+<span class="c"># on macOS: claude-mac-sandbox --net restricted --allow dev --allow ~/allow-myapp.txt</span></pre><button class="copy" type="button">Copy</button></div>
+      <p>To see what was blocked, follow the proxy log; the launcher prints where it is when it starts.</p>
+      <div class="cmd only-mac"><pre>grep refused ~/.local/state/claude-mac-sandbox/proxy-*.log</pre><button class="copy" type="button">Copy</button></div>
+      <div class="cmd only-linux"><pre>podman logs -f claude-proxy-&lt;id&gt; | grep refused
+claude-sandbox --stop-proxies          <span class="c"># remove idle proxies</span></pre><button class="copy" type="button">Copy</button></div>
+      <div class="callout only-linux">Port publishing needs <code>--net full</code>. With the allowlist on, run the dev server from a separate <code>--net full --shell</code> session if you need to open it in your browser.</div>
+    </section>
+
+    <!-- ---------------- verify ---------------- -->
+    <section id="verify">
+      <h2>Verify it works</h2>
+      <p>The kit includes an end-to-end test suite. Run it on your machine after setup, and after <span class="only-linux">Podman or </span>OS upgrades:</p>
+      <div class="cmd only-linux"><pre>cd ~/harness-container && tests/run-tests.sh</pre><button class="copy" type="button">Copy</button></div>
+      <div class="cmd only-mac"><pre>cd ~/harness-container && tests/macos/run-tests.sh</pre><button class="copy" type="button">Copy</button></div>
+      <p class="only-mac">It uses throwaway folders, a throwaway Claude config and test-only Keychain items, so it doesn't touch your real login. It checks that writes outside the project are blocked (including through symlinks and child processes, and to <code>~/.zshrc</code>, LaunchAgents and the Claude binary); that credential files, the ssh-agent and, when blocked, the Keychain are out of reach; that tokens in your environment aren't passed in; sign-in wiring; all three network modes, including attempts to skip the proxy; <code>swift build</code>, <code>swift test</code> and <code>xcodebuild test</code> of a sample Mac project; SwiftPM fetching through the allowlist; and per-project conversation storage. GitHub Actions runs it on macOS 14 and 15 for every push and weekly.</p>
+      <p class="only-linux">It checks the host prerequisites; the image contents; that files written inside show up on your computer owned by you (new files, edits, renames, git commits, live while running); per-project conversation storage; that state survives exits, image rebuilds and a volume backup and restore; the security limits; all three network modes, including attempts to get around the proxy; and that each sign-in method is wired correctly.</p>
+      <p><span class="only-linux">The same suite runs in GitHub Actions on x86_64 and arm64 for every push and weekly. </span> To also run real Claude conversations there, including resuming a conversation in a fresh container, add the repository secret <code>ANTHROPIC_API_KEY</code> or <code>CLAUDE_CODE_OAUTH_TOKEN</code>.</p>
+    </section>
+
+    <!-- ---------------- trouble ---------------- -->
+    <section id="trouble">
+      <h2>Troubleshooting</h2>
+      <details><summary><code>--continue</code> finds no conversation, or the wrong one</summary>
+        <p>Conversations belong to the folder you started from. <code>cd</code> into exactly the same folder (same absolute path) and run it again. If you moved the project, use <code>claude-sandbox --resume</code> and press <kbd>Ctrl</kbd>+<kbd>A</kbd>, or resume by session ID. Conversations older than the retention period (30 days unless you changed it) are deleted.</p></details>
+      <details class="only-linux"><summary><code>unknown option keep-id:uid</code> or "invalid userns mode"</summary>
+        <p>Podman is older than 4.3. Upgrade it (Ubuntu 24.04+, Debian 12+, Fedora 38+).</p></details>
+      <details class="only-linux"><summary>Allowlist mode can't find <code>claude-proxy-…</code></summary>
+        <p>Podman is using the old CNI network backend. Install <code>netavark</code> and <code>aardvark-dns</code>, then run <code>podman system reset</code>. That deletes all containers, images and volumes, so export the volumes first (see "New computer" under Resuming work).</p></details>
+      <details class="only-linux"><summary>Login page never returns to the terminal</summary>
+        <p>Expected inside a container. After signing in, the browser shows a code: paste it at <code>Paste code here if prompted</code>.</p></details>
+      <details><summary>Requests fail with 403 in allowlist mode</summary>
+        <p>The host isn't on the allowlist. Check the proxy log for the blocked name, then add it with an <code>--allow</code> file, or use <code>--allow dev</code> for package registries.</p></details>
+      <details class="only-linux"><summary>"Permission denied" on project files</summary>
+        <p>Make sure you never ran the launcher or Podman with <code>sudo</code>: files created by a rootful run are owned by root. Fix ownership with <code>sudo chown -R "$USER": .</code> On Fedora or RHEL, keep the launcher's <code>:Z</code> labels; don't mount the same folder into other containers with <code>:z</code>.</p></details>
+      <details class="only-linux"><summary>"refusing to mount" or "collides with a container system path"</summary>
+        <p>The launcher won't mount your whole home folder or <code>/</code>, or a folder whose path would shadow system directories inside the container. Move into a project folder, or pass <code>--mount-at /workspace/my-app</code>.</p></details>
+      <details class="only-linux"><summary>"the requested cgroup controller is not available"</summary>
+        <p>Your user isn't allowed to set limits. Either do the optional resource-limits step, or ignore it: the launcher detects this and starts without limits.</p></details>
+      <details class="only-linux"><summary>A tool I installed last time is gone</summary>
+        <p>Tools installed with <code>npm -g</code>, <code>pipx</code>, <code>go install</code> or <code>cargo install</code> persist. Ones installed with <code>apt</code> don't (and need root anyway): add them to the image with <code>EXTRA_APT</code> and rebuild.</p></details>
+          <details class="only-mac"><summary><code>sandbox_apply: Operation not permitted</code></summary>
+        <p>Something tried to start a second sandbox inside this one, which macOS refuses. Usual causes: running <code>swift</code> or <code>xcodebuild</code> through <code>xcrun</code> (call them directly so the launcher's wrappers apply), Claude's built-in <code>/sandbox</code> being enabled (turn it off while using the launcher), or starting the launcher from inside another sandboxed app's terminal.</p></details>
+      <details class="only-mac"><summary>"Operation not permitted" when writing a file</summary>
+        <p>The path is outside what the sandbox allows. If the tool really needs it, add <code>--allow-write PATH</code> for that run. Check the rules with <code>claude-mac-sandbox --print-profile</code>.</p></details>
+      <details class="only-mac"><summary><code>git init</code>, <code>git config</code>, <code>git push -u</code> or installing hooks fails</summary>
+        <p><code>.git/config</code> and <code>.git/hooks</code> are read-only by default, because a changed git setting or hook would run code the next time you use git outside the sandbox. Run that step in a normal terminal, or pass <code>--allow-git-config</code> for one run and review the result.</p></details>
+      <details class="only-mac"><summary>Claude says it isn't logged in, with the Keychain blocked</summary>
+        <p>The subscription login lives in the Keychain. With <code>--no-keychain</code>, sign in with <code>--auth token</code> or <code>--auth apikey</code>, which the launcher reads before the sandbox starts.</p></details>
+      <details class="only-mac"><summary>Code signing fails in <code>xcodebuild</code></summary>
+        <p>Signing with your certificates needs the Keychain: don't use <code>--no-keychain</code> for that run. Signing isn't covered by the automated tests yet.</p></details>
+      <details class="only-mac"><summary>macOS asks whether Terminal may access Documents or Desktop</summary>
+        <p>That's macOS privacy protection, not the sandbox. Allow it for your terminal app, or keep projects in a folder such as <code>~/code</code>.</p></details>
+      <details class="only-mac"><summary><code>--net restricted needs tinyproxy</code></summary>
+        <p>Install it with <code>brew install tinyproxy</code>, or use full or no network.</p></details>
+    </section>
+  </main>
+</div>
+
+<footer>
+  Based on the Claude Code documentation on <a href="https://code.claude.com/docs/en/authentication">authentication</a>, <a href="https://code.claude.com/docs/en/sessions">sessions</a>, <a href="https://code.claude.com/docs/en/sandboxing">sandboxing</a>, <a href="https://code.claude.com/docs/en/network-config">network access</a> and <a href="https://code.claude.com/docs/en/devcontainer">development containers</a>, and the <a href="https://github.com/nycnighthawk/harness-container">harness-container</a> kit.
+</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(s,r){return (r||document).querySelector(s)};
+  var $$ = function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+  var store = {
+    get:function(k,d){try{var v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch(e){return d}},
+    set:function(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+  };
+
+  /* ---------- copy buttons ---------- */
+  function copyText(t,btn){
+    function done(){btn.textContent="Copied";btn.classList.add("done");setTimeout(function(){btn.textContent="Copy";btn.classList.remove("done")},1400)}
+    if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,fallback)}else{fallback()}
+    function fallback(){var ta=document.createElement("textarea");ta.value=t;ta.setAttribute("readonly","");ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.select();try{document.execCommand("copy");done()}catch(e){btn.textContent="Select and copy"}document.body.removeChild(ta)}
+  }
+  document.addEventListener("click",function(e){
+    var b=e.target.closest(".copy"); if(!b) return;
+    var pre=b.dataset.copy?$(b.dataset.copy):b.parentNode.querySelector("pre");
+    var clone=pre.cloneNode(true); $$(".c",clone).forEach(function(c){c.remove()});
+    var t=clone.textContent.split("\n").map(function(l){return l.replace(/\s+$/,"")}).join("\n").trim();
+    copyText(t,b);
+  });
+
+  /* ---------- tabs ---------- */
+  $$("[data-tabs]").forEach(function(tw){
+    var tabs=$$('[role=tab]',tw), panels=$$('[role=tabpanel]',tw);
+    tabs.forEach(function(t,i){
+      t.id=t.id||("tab-"+Math.random().toString(36).slice(2,8)); panels[i].setAttribute("aria-labelledby",t.id);
+      t.tabIndex=i===0?0:-1;
+      t.addEventListener("click",function(){sel(i)});
+      t.addEventListener("keydown",function(e){
+        var n=null; if(e.key==="ArrowRight")n=(i+1)%tabs.length; if(e.key==="ArrowLeft")n=(i-1+tabs.length)%tabs.length;
+        if(n!==null){e.preventDefault();sel(n);tabs[n].focus()}
+      });
+    });
+    function sel(i){tabs.forEach(function(t,j){t.setAttribute("aria-selected",j===i);t.tabIndex=j===i?0:-1;panels[j].hidden=j!==i})}
+  });
+
+  /* ---------- platform ---------- */
+  var platform=store.get("cs-platform","linux");
+  if(platform!=="mac"&&platform!=="linux") platform="linux";
+
+  /* ---------- setup checklist (one list per platform) ---------- */
+  var saved=store.get("cs-steps",{}), tocSteps=$("#toc-steps");
+  var allSteps=$$(".step");
+  allSteps.forEach(function(s){
+    var cb=$("[data-step]",s); cb.checked=!!saved[s.id];
+    cb.addEventListener("change",function(){saved[s.id]=cb.checked;store.set("cs-steps",saved);paint()});
+  });
+  function curSteps(){return $$('.steps[data-pf="'+platform+'"] .step')}
+  function buildToc(){
+    tocSteps.innerHTML="";
+    curSteps().forEach(function(s){
+      var li=document.createElement("li"), a=document.createElement("a");
+      a.href="#"+s.id; a.innerHTML='<span>'+s.dataset.title+'</span><span class="tick" aria-hidden="true"></span>';
+      li.appendChild(a); tocSteps.appendChild(li); s._toc=a;
+    });
+  }
+  $("#reset").addEventListener("click",function(){curSteps().forEach(function(s){saved[s.id]=false;$("[data-step]",s).checked=false});store.set("cs-steps",saved);paint()});
+  function paint(){
+    allSteps.forEach(function(s){s.classList.toggle("done",$("[data-step]",s).checked)});
+    var st=curSteps(), n=0;
+    st.forEach(function(s){var on=$("[data-step]",s).checked; if(s._toc){$(".tick",s._toc).textContent=on?"✓":""; s._toc.setAttribute("aria-label",s.dataset.title+(on?" (done)":""))} if(on)n++});
+    $("#prog").style.width=(st.length?100*n/st.length:0)+"%";
+    $("#prog-l").textContent=n+" of "+st.length+" setup steps done";
+  }
+
+  /* ---------- command builder + boundary map ---------- */
+  var f=$("#builder");
+  var st=store.get("cs-builder",null);
+  if(st){ try{
+    ["sess","net","auth"].forEach(function(k){var r=f.querySelector('input[name='+k+'][value="'+st[k]+'"]'); if(r) r.checked=true});
+    $("#f-path").value=st.path||$("#f-path").value; $("#f-name").value=st.name||""; $("#f-ports").value=st.ports||"";
+    ["dev","yolo","ro","git","tmux","nokc","gitcfg"].forEach(function(k){$("#f-"+k).checked=!!st[k]});
+  }catch(e){} }
+
+  function q(s){ // shell-quote if needed (keep ~ expandable)
+    if(/^[A-Za-z0-9_\/.~:@%+=,-]+$/.test(s)) return s;
+    if(s.indexOf("~/")===0) return "~/"+q(s.slice(2));
+    return "'"+s.replace(/'/g,"'\\''")+"'";
+  }
+  function val(n){return f.querySelector('input[name='+n+']:checked').value}
+
+  function render(){
+    var mac = platform==="mac";
+    var sess=val("sess"), net=val("net"), auth=val("auth");
+    var path=$("#f-path").value.trim()||".";
+    var name=$("#f-name").value.trim().replace(/\s+/g,"-");
+    var ports=$("#f-ports").value.trim().split(/[\s,]+/).filter(Boolean);
+    var dev=$("#f-dev"), yolo=$("#f-yolo"), ro=$("#f-ro"), git=$("#f-git"), tmux=$("#f-tmux"), nokc=$("#f-nokc"), gitcfg=$("#f-gitcfg");
+    if(mac){ ports=[]; }
+    var why=[];
+
+    // constraints
+    var shell = sess==="shell";
+    var noneNet = net==="none";
+    f.querySelectorAll('input[name=sess]').forEach(function(r){ r.disabled = noneNet && r.value!=="shell" });
+    if(noneNet && !shell){ f.querySelector('input[name=sess][value=shell]').checked=true; sess="shell"; shell=true; why.push("No network means Claude can't reach its API, so this opens a shell.") }
+    dev.disabled = net!=="restricted"; $("#l-dev").classList.toggle("off",dev.disabled);
+    $("#f-ports").disabled = net!=="full";
+    yolo.disabled = shell; yolo.parentNode.classList.toggle("off",shell);
+    var nameField=$("#f-name"), nameL=$("#f-name-l");
+    nameField.disabled = (sess==="continue"||sess==="pick"||shell);
+    nameL.textContent = sess==="name" ? "Session name to resume" : "Name this session (optional)";
+    if(sess==="name" && !name) why.push("Type the session name to resume.");
+
+    // command
+    var a=[mac?"claude-mac-sandbox":"claude-sandbox"];
+    var proj = (path==="."||path==="./") ? null : path;
+    if(net!=="full") a.push("--net",net);
+    if(net==="restricted" && dev.checked) a.push("--allow","dev");
+    if(net==="full") ports.forEach(function(p){a.push("-p",p)});
+    if(auth!=="login") a.push("--auth",auth);
+    if(ro.checked) a.push("--ro");
+    if(!mac && git.checked) a.push("--gitconfig");
+    if(mac && nokc.checked) a.push("--no-keychain");
+    if(mac && gitcfg.checked && !ro.checked) a.push("--allow-git-config");
+    if(shell) a.push("--shell");
+    else {
+      if(yolo.checked) a.push("--yolo");
+      if(sess==="continue") a.push("--continue");
+      if(sess==="pick") a.push("--resume");
+      if(sess==="name") a.push("--resume", name?q(name):"<name>");
+      if(sess==="new" && name) a.push("-n", q(name));
+    }
+    var cmd=a.join(" ");
+    var lines=[];
+    if(proj) lines.push("cd "+q(proj));
+    if(tmux.checked){
+      var tn=(name||(proj||"project").split("/").filter(Boolean).pop()||"claude").replace(/[^A-Za-z0-9_-]/g,"-");
+      lines.push("tmux new -As "+tn+" "+q(cmd));
+      why.push("Reattach later with: tmux attach -t "+tn+".");
+    } else lines.push(cmd);
+    $("#cmd-text").textContent=lines.join("\n");
+
+    if(auth==="token") why.push(mac?"Reads the claude-sandbox-oauth-token Keychain item from setup.":"Needs the claude_oauth_token secret from setup.");
+    if(auth==="apikey") why.push(mac?"Reads the claude-sandbox-anthropic-api-key Keychain item from setup.":"Needs the anthropic_api_key secret from setup.");
+    if(mac && nokc.checked && auth==="login" && !shell) why.push("With the Keychain blocked, the subscription login can't be read: choose a token or API key.");
+    if(mac && gitcfg.checked) why.push("git config and hooks become writable for this run; review them afterwards.");
+    if(sess==="continue") why.push("Reopens the latest conversation for this folder.");
+    if(sess==="pick") why.push("Shows this folder's conversations to choose from.");
+    if(yolo.checked && !shell) why.push("No permission prompts: Claude can change anything in the project folder"+(net==="full"?" and reach the whole internet.":"."));
+    $("#cmd-why").textContent=why.join(" ");
+
+    // map
+    var root=document.documentElement.style, gate=$("#m-gate"), wire=$("#m-wire"), note=$("#m-note"), netl=$("#m-net");
+    var colors={full:["var(--open)","var(--open-soft)","#1E7F55"],restricted:["var(--gated)","var(--gated-soft)","#A86A12"],none:["var(--sealed)","var(--sealed-soft)","#A33A3A"]}[net];
+    root.setProperty("--gate",colors[0]); root.setProperty("--gate-soft",colors[1]);
+    wire.setAttribute("stroke",colors[2]);
+    wire.setAttribute("stroke-dasharray", net==="restricted" ? "6 5" : (net==="none" ? "2 9" : "0"));
+    if(net==="full"){gate.textContent="Open"+(ports.length?" ⇄ ports":""); netl.textContent="Everything"+(ports.length?"; ports "+ports.join(", ")+" on 127.0.0.1":""); note.textContent="Full network: Claude, package installs"+(ports.length?" and your published dev server":"")+" all work.";}
+    if(net==="restricted"){gate.textContent=mac?"Local proxy":"Allow­list proxy"; netl.textContent=dev.checked?"Claude services, GitHub, package registries":"Claude services only"; note.textContent=dev.checked?"Allowlist: Claude, git and package installs work; every other host is refused.":"Allowlist: only Claude's own services. git clone and package installs are blocked.";}
+    if(net==="none"){gate.textContent="Sealed"; netl.textContent="Nothing"; note.textContent="No network: good for offline builds and tests in a shell.";}
+
+    $("#m-path").textContent=mac ? path+" (edited in place)" : path+"  →  same path inside";
+    $("#m-mount").textContent=ro.checked?"read-only":"read + write";
+    $("#m-host").textContent=mac?"Your Mac (your own user, no admin rights)":"Your computer (normal user, no sudo)";
+    $("#m-box-title").textContent=mac?"Seatbelt sandbox":"Sandbox container";
+    var vols = mac ? [["~/.claude","Login state, settings, sessions per project",false],["~/Library/Developer","DerivedData, simulators, build caches",false],["Blocked","~/.ssh, ~/.zshrc, LaunchAgents, .git/hooks"+(nokc.checked?", Keychain":""),true]]
+                   : [["claude-config","Login, settings, session history per project",false],["claude-tools","npm -g, pipx, go, cargo, shell history",false],["claude-cache","npm and pip download caches",false]];
+    ["v-config","v-tools","v-cache"].forEach(function(id,k){var el=$("#"+id); el.innerHTML="<b>"+vols[k][0]+"</b>"+vols[k][1]; el.classList.toggle("no",vols[k][2])});
+    $("#m-arrow-out").style.display=ro.checked?"none":"";
+    $("#m-run").innerHTML=mac ? (shell?"bash, swift, xcodebuild, git (native)":"claude, swift, xcodebuild, git (native)") : (shell?"bash, as user <code>claude</code>":"claude, as user <code>claude</code>");
+    var pp=[]; if(!mac && git.checked) pp.push('<span class="pill">~/.gitconfig, read-only</span>');
+    if(mac && !gitcfg.checked && !ro.checked) pp.push('<span class="pill">.git/config read-only</span>');
+    $("#m-proj-pills").innerHTML=pp.join("");
+    var bp=[]; bp.push('<span class="pill key">'+({login:"subscription login",token:"subscription token",apikey:"API key"})[auth]+(mac&&auth!=="login"?" from Keychain":"")+'</span>');
+    if(mac && nokc.checked) bp.push('<span class="pill">no Keychain</span>');
+    if(yolo.checked&&!shell) bp.push('<span class="pill warn">no prompts</span>');
+    if(sess==="continue"||sess==="pick"||sess==="name") bp.push('<span class="pill">resuming</span>');
+    $("#m-box-pills").innerHTML=bp.join("");
+    $("#v-config").classList.toggle("hot", sess==="continue"||sess==="pick"||sess==="name"||auth==="login");
+    $("#v-tools").classList.toggle("hot", mac ? shell : shell);
+
+    store.set("cs-builder",{sess:sess,net:net,auth:auth,path:$("#f-path").value,name:$("#f-name").value,ports:$("#f-ports").value,dev:dev.checked,yolo:yolo.checked,ro:ro.checked,git:git.checked,tmux:tmux.checked,nokc:nokc.checked,gitcfg:gitcfg.checked});
+  }
+  f.addEventListener("input",render); f.addEventListener("change",render);
+
+  /* ---------- resume scenarios ---------- */
+  var S_linux=[
+    {t:"I closed the terminal or Claude exited",b:'<p>Nothing was lost. Go back to the same folder and continue:</p>'+C('cd ~/code/my-app\nclaude-sandbox --continue')+'<p>If you had several conversations going, use <code>claude-sandbox --resume</code> to pick one. Unfinished tool calls are marked as interrupted, and Claude checks whether they took effect before running them again.</p>'},
+    {t:"I restarted my computer",b:'<p>Containers don\'t need restarting: each run starts a fresh one. Volumes, images and secrets are all on disk.</p>'+C('cd ~/code/my-app\nclaude-sandbox --continue')+'<p>Allowlist proxies are recreated automatically the first time you use <code>--net restricted</code>.</p>'},
+    {t:"My SSH connection dropped mid-task",b:'<p>The sandbox stops when its terminal goes away. Next time, start it inside <code>tmux</code> on the host so it keeps running:</p>'+C("tmux new -As my-app 'claude-sandbox --continue'\n# after reconnecting:\ntmux attach -t my-app")+'<p>For this time, reconnect and run <code>claude-sandbox --continue</code>.</p>'},
+    {t:"I updated or rebuilt the image",b:'<p>Rebuilding replaces Claude Code and system packages; your volumes are untouched, so logins, conversations and tools stay.</p>'+C('cd ~/harness-container && git pull\npodman build --pull -t claude-sandbox .\ncd ~/code/my-app && claude-sandbox --continue')},
+    {t:"I work on several things at once",b:'<p>Give each line of work its own name, or its own git worktree. A worktree is a separate folder, so its conversations are separate too.</p>'+C('claude-sandbox -n api-pagination\nclaude-sandbox --resume api-pagination\n\ngit worktree add ../my-app-ui ui-redesign\ncd ../my-app-ui && claude-sandbox')+'<p>Don\'t resume the same conversation in two terminals at once: both write into one transcript and the messages interleave. Use <code>--fork-session</code> to make a copy instead.</p>'},
+    {t:"I moved or renamed the project folder",b:'<p>Conversations are filed under the folder\'s old path. Two ways back:</p>'+C('cd ~/code/new-place\nclaude-sandbox --resume          # then Ctrl+A to see every project\n\n# or reach the old path directly:\nclaude-sandbox --mount-at /home/you/code/old-place --continue')+'<p>Resuming by session ID also works from any folder.</p>'},
+    {t:"I'm moving to a new computer",b:'<p>Export the volumes on the old machine, set up the new one (all setup steps except signing in), then import:</p>'+C('# old computer\nfor v in claude-config claude-tools; do\n  podman volume export $v -o $v.tar\ndone\n\n# new computer\nfor v in claude-config claude-tools; do\n  podman volume create $v && podman volume import $v $v.tar\ndone')+'<p>Put each project at the <b>same path</b> as before, so <code>--continue</code> finds its conversations. <code>claude-config.tar</code> contains your login: treat it like a password and delete it after importing.</p>'},
+    {t:"An old conversation is missing",b:'<p>By default Claude Code deletes conversations older than 30 days, and deleted ones can\'t be recovered. Check the retention setting:</p>'+C("claude-sandbox --net none --shell -c 'cat ~/.claude/settings.json'")+'<p>If <code>cleanupPeriodDays</code> isn\'t there, do setup step 7. Also make sure you\'re in the folder the conversation started in.</p>'},
+    {t:"I want to start completely fresh",b:'<p>Remove one or more volumes. Removing <code>claude-config</code> signs you out and deletes every project\'s conversation history.</p>'+C('podman volume rm claude-tools claude-cache   # tools and caches only\npodman volume rm claude-config               # login and all conversations')}
+  ];
+  var S_mac=[
+    {t:"I closed the terminal or Claude exited",b:'<p>Nothing was lost. Go back to the same folder and continue:</p>'+C('cd ~/code/MyMacApp\nclaude-mac-sandbox --continue')+'<p>With several conversations going, use <code>claude-mac-sandbox --resume</code> to pick one. Unfinished tool calls are marked as interrupted, and Claude checks whether they took effect before running them again.</p>'},
+    {t:"I restarted my Mac",b:'<p>There is nothing to restart: the sandbox is applied fresh each time you launch it, and conversations, logins and build products are all on disk.</p>'+C('cd ~/code/MyMacApp\nclaude-mac-sandbox --continue')},
+    {t:"My SSH connection dropped mid-task",b:'<p>The session stops when its terminal goes away. Next time, start it inside <code>tmux</code> (<code>brew install tmux</code>) so it keeps running:</p>'+C("tmux new -As myapp 'claude-mac-sandbox --continue'\n# after reconnecting:\ntmux attach -t myapp")+'<p>For this time, reconnect and run <code>claude-mac-sandbox --continue</code>.</p>'},
+    {t:"Claude Code or Xcode was updated",b:'<p>Nothing to rebuild. Update Claude in a normal terminal (it can\'t update itself from inside the sandbox) and carry on; conversations keep working across versions.</p>'+C('claude update\ncd ~/code/MyMacApp && claude-mac-sandbox --continue')+'<p>After an Xcode update, run <code>macos/check-macos.sh</code> once to confirm the tools are selected.</p>'},
+    {t:"I work on several things at once",b:'<p>Give each line of work its own name, or its own git worktree. A worktree is a separate folder, so its conversations are separate too.</p>'+C('claude-mac-sandbox -n settings-window\nclaude-mac-sandbox --resume settings-window\n\ngit worktree add ../MyMacApp-ui ui-redesign\ncd ../MyMacApp-ui && claude-mac-sandbox')+'<p>Don\'t resume the same conversation in two terminals at once: both write into one transcript. Use <code>--fork-session</code> to make a copy instead.</p>'},
+    {t:"I moved or renamed the project folder",b:'<p>Conversations are filed under the folder\'s old path. From the new folder, open the picker and widen it to every project, or resume by session ID, which works from any folder:</p>'+C('cd ~/code/new-place\nclaude-mac-sandbox --resume          # then Ctrl+A to see every project\nclaude-mac-sandbox --resume <session-id>')},
+    {t:"I\'m moving to a new Mac",b:'<p>Do the setup steps on the new Mac, then copy your Claude history and settings. On a Mac the login itself is in the Keychain, not in these files, so sign in again on the new machine.</p>'+C('# from the old Mac\nrsync -a ~/.claude ~/.claude.json new-mac.local:')+'<p>Put each project at the <b>same path</b> as before, so <code>--continue</code> finds its conversations.</p>'},
+    {t:"An old conversation is missing",b:'<p>By default Claude Code deletes conversations older than 30 days, and deleted ones can\'t be recovered. Check the retention setting:</p>'+C('cat ~/.claude/settings.json')+'<p>If <code>cleanupPeriodDays</code> isn\'t there, do the last setup step. Also make sure you\'re in the folder the conversation started in.</p>'},
+    {t:"I want to start a project fresh",b:'<p>Start a new conversation any time by running the launcher without <code>--continue</code>. To remove a project\'s saved conversations, delete its folder under <code>~/.claude/projects</code>; the folder name is the project path with every non-alphanumeric character replaced by <code>-</code>.</p>'+C('ls ~/.claude/projects')}
+  ];
+  function C(t){return '<div class="cmd"><pre>'+t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/(#[^\n]*)/g,'<span class="c">$1</span>')+'</pre><button class="copy" type="button">Copy</button></div>'}
+  var list=$("#scen-list"), body=$("#scen-body"), S=S_linux;
+  function buildScen(){
+    S = platform==="mac" ? S_mac : S_linux; list.innerHTML="";
+    S.forEach(function(s,i){
+      var b=document.createElement("button"); b.type="button"; b.textContent=s.t; b.setAttribute("aria-pressed","false");
+      b.addEventListener("click",function(){show(i)}); list.appendChild(b);
+    });
+    show(Math.min(store.get("cs-scen",0),S.length-1));
+  }
+  function show(i){$$("button",list).forEach(function(b,j){b.setAttribute("aria-pressed",j===i)}); body.innerHTML="<h3>"+S[i].t+"</h3>"+S[i].b; store.set("cs-scen",i)}
+
+  /* ---------- apply platform ---------- */
+  function setPlatform(pf){
+    platform=pf; store.set("cs-platform",pf);
+    document.body.setAttribute("data-platform",pf);
+    $$(".pf button").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.pf===pf)});
+    $("#pf-sub").textContent = pf==="mac" ? "For Mac and Xcode projects. No containers or virtual machines." : "Windows: use Linux inside WSL 2.";
+    var fp=$("#f-path"); if(fp.value==="~/code/my-app"&&pf==="mac") fp.value="~/code/MyMacApp"; else if(fp.value==="~/code/MyMacApp"&&pf==="linux") fp.value="~/code/my-app";
+    $$(".cmdn").forEach(function(c){c.textContent=c.textContent.replace(/^claude(-mac)?-sandbox/, pf==="mac"?"claude-mac-sandbox":"claude-sandbox")});
+    buildToc(); paint(); buildScen(); render();
+  }
+  $$(".pf button").forEach(function(b){b.addEventListener("click",function(){setPlatform(b.dataset.pf)})});
+  var hashPf=(location.hash==="#macos")?"mac":(location.hash==="#linux"?"linux":null);
+  setPlatform(hashPf||platform);
+  window.addEventListener("hashchange",function(){ if(location.hash==="#macos") setPlatform("mac"); if(location.hash==="#linux") setPlatform("linux"); });
+})();
+</script>
+</body>
+</html>

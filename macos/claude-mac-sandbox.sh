@@ -1,0 +1,263 @@
+#!/bin/bash
+# shellcheck disable=SC2054  # commas are part of env values
+# claude-mac-sandbox: run Claude Code on macOS confined by the built-in Seatbelt
+# sandbox (sandbox-exec). No containers or VMs: Claude and every process it
+# starts (swift, xcodebuild, git, npm, ...) run natively, but can only write to
+# the project and the tool caches it needs, can't read common credential files,
+# and get the network policy you choose.
+#
+#   claude-mac-sandbox [options] [claude args...]
+#
+# Network (--net):
+#   full        Unrestricted outbound network (default).
+#   restricted  Direct connections are blocked by Seatbelt; the only way out is a
+#               local tinyproxy that allows Claude's hosts plus any --allow lists.
+#   none        No outbound network (local unix sockets still work). Claude can't
+#               reach its API: use with --shell for offline builds and tests.
+#
+# Options:
+#   --net MODE            full | restricted | none
+#   --allow NAME|FILE     add an allowlist (allowlist/NAME.txt or a path); repeatable
+#   --auth MODE           login (default) | token | apikey  (token/key read from Keychain)
+#   --project DIR         project directory (default: current directory)
+#   --ro                  project is read-only
+#   --allow-write DIR     also allow writes under DIR; repeatable
+#   --hide PATH           also deny reads of PATH; repeatable
+#   --no-keychain         block the Keychain (files and service). Claude's normal login
+#                         lives there, so sign in with --auth token|apikey instead
+#   --allow-git-config    allow writing .git/config and .git/hooks (blocked by default)
+#   --yolo                pass --dangerously-skip-permissions to claude
+#   --shell               start bash instead of claude
+#   --print-profile       print the generated Seatbelt profile and exit
+#   -h, --help
+#
+# Any other argument goes to claude:  claude-mac-sandbox --continue
+#                                     claude-mac-sandbox --resume [id|name]
+#
+# Keychain items used by --auth (create once, you'll be prompted for the value):
+#   security add-generic-password -U -a "$USER" -s claude-sandbox-oauth-token -w
+#   security add-generic-password -U -a "$USER" -s claude-sandbox-anthropic-api-key -w
+set -euo pipefail
+
+die() { echo "claude-mac-sandbox: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0; }
+
+# Resolve this script's real directory (macOS readlink has no -f before 12.3).
+src="$0"; while [ -L "$src" ]; do d="$(cd "$(dirname "$src")" && pwd -P)"; src="$(readlink "$src")"; case "$src" in /*) ;; *) src="$d/$src";; esac; done
+HERE="$(cd "$(dirname "$src")" && pwd -P)"
+REPO="$(cd "$HERE/.." && pwd -P)"
+
+KC_TOKEN="${KEYCHAIN_SERVICE_TOKEN:-claude-sandbox-oauth-token}"
+KC_APIKEY="${KEYCHAIN_SERVICE_APIKEY:-claude-sandbox-anthropic-api-key}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-mac-sandbox"
+
+net=full auth=login project="$PWD" ro=0 yolo=0 shell=0 keychain=1 gitcfg=0 print=0
+allows=() extra_w=() hides=() passthru=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --net)              net="${2:?}"; shift 2 ;;
+    --allow)            allows+=("${2:?}"); shift 2 ;;
+    --auth)             auth="${2:?}"; shift 2 ;;
+    --project)          project="${2:?}"; shift 2 ;;
+    --ro)               ro=1; shift ;;
+    --allow-write)      extra_w+=("${2:?}"); shift 2 ;;
+    --hide)             hides+=("${2:?}"); shift 2 ;;
+    --no-keychain)      keychain=0; shift ;;
+    --allow-git-config) gitcfg=1; shift ;;
+    --yolo)             yolo=1; shift ;;
+    --shell)            shell=1; shift ;;
+    --print-profile)    print=1; shift ;;
+    -h|--help)          usage ;;
+    --)                 shift; while [ $# -gt 0 ]; do passthru+=("$1"); shift; done ;;
+    *)                  passthru+=("$1"); shift ;;
+  esac
+done
+
+[ "$(uname -s)" = Darwin ] || die "this launcher is for macOS; on Linux use claude-sandbox.sh (Podman)"
+[ -x /usr/bin/sandbox-exec ] || die "/usr/bin/sandbox-exec not found"
+
+realdir() { (cd "$1" 2>/dev/null && pwd -P) || die "no such directory: $1"; }
+# Real path of a file or directory that may not exist yet (resolve the parent).
+realpath_any() {
+  if [ -d "$1" ]; then realdir "$1"; return; fi
+  local p; p="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || { echo "$1"; return; }
+  echo "$p/$(basename "$1")"
+}
+sq() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }   # SBPL string
+rx() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'; }                      # regex-escape
+
+project="$(realdir "$project")"
+H="$(realdir "$HOME")"
+[ "$project" = / ] || [ "$project" = "$H" ] && die "refusing to sandbox '$project' (your whole home or /). cd into a project directory."
+CFG="${CLAUDE_CONFIG_DIR:-$H/.claude}"; mkdir -p "$CFG"; CFG="$(realdir "$CFG")"
+
+# ------------------------------------------------------------ Seatbelt profile
+P="(version 1)
+;; Generated by claude-mac-sandbox for $project
+(allow default)
+
+;; ---- Writes: denied everywhere except the project and tool state/caches
+(deny file-write*)
+(allow file-write*"
+[ "$ro" = 1 ] || P="$P
+  (subpath $(sq "$project"))"
+P="$P
+  (subpath $(sq "$CFG"))
+  (regex #\"^$(rx "$H")/\\.claude\\.json\")
+  (subpath $(sq "$H/.cache"))
+  (subpath $(sq "$H/.local/state/claude"))
+  (subpath $(sq "$H/Library/Caches"))
+  (subpath $(sq "$H/Library/Developer"))
+  (subpath $(sq "$H/Library/org.swift.swiftpm"))
+  (subpath $(sq "$H/.swiftpm"))
+  (subpath $(sq "$H/.npm"))
+  (subpath \"/private/tmp\")
+  (subpath \"/private/var/folders\")
+  (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\")
+  (literal \"/dev/tty\") (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+$\") (regex #\"^/dev/fd/\")"
+if [ ${#extra_w[@]} -gt 0 ]; then
+  for w in "${extra_w[@]}"; do mkdir -p "$w"; P="$P
+  (subpath $(sq "$(realdir "$w")"))"; done
+fi
+P="$P)"
+
+if [ "$gitcfg" = 0 ] && [ "$ro" = 0 ]; then
+  P="$P
+
+;; ---- Git config and hooks run code later, outside the sandbox: keep them read-only
+(deny file-write* (literal $(sq "$project/.git/config")) (subpath $(sq "$project/.git/hooks")))"
+fi
+
+P="$P
+
+;; ---- Reads: credential stores and keys
+(deny file-read*
+  (subpath $(sq "$H/.ssh")) (subpath $(sq "$H/.aws")) (subpath $(sq "$H/.gnupg"))
+  (subpath $(sq "$H/.config/gh")) (subpath $(sq "$H/.config/gcloud")) (subpath $(sq "$H/.azure"))
+  (subpath $(sq "$H/.kube")) (subpath $(sq "$H/.docker"))
+  (literal $(sq "$H/.netrc")) (literal $(sq "$H/.git-credentials")) (literal $(sq "$H/.npmrc"))
+  (literal $(sq "$H/.pypirc"))"
+if [ ${#hides[@]} -gt 0 ]; then
+  for h in "${hides[@]}"; do P="$P
+  (subpath $(sq "$(realpath_any "$h")"))"; done
+fi
+P="$P)
+
+;; ---- SSH agent: no signing with your keys from inside
+(deny network-outbound (remote unix-socket (path-regex #\"^/private/tmp/com\\.apple\\.launchd\\.[^/]+/Listeners$\")))"
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then P="$P
+(deny network-outbound (remote unix-socket (path-literal $(sq "$(realpath_any "$SSH_AUTH_SOCK")"))))"; fi
+
+if [ "$keychain" = 0 ]; then P="$P
+
+;; ---- Keychain blocked (files and the security service)
+(deny file-read* (subpath $(sq "$H/Library/Keychains")) (subpath \"/Library/Keychains\"))
+(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\"))"
+fi
+
+# ------------------------------------------------------------ network
+port=""
+pick_port() {
+  local p
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    p=$(( (RANDOM % 30000) + 20000 ))
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 || { echo "$p"; return; }
+  done
+  die "could not find a free local port for the proxy"
+}
+case "$net" in
+  full) ;;
+  restricted)
+    port="$(pick_port)"
+    P="$P
+
+;; ---- Network: only the local allowlist proxy
+(deny network-outbound (remote ip \"*:*\"))
+(allow network-outbound (remote ip \"localhost:$port\"))" ;;
+  none)
+    [ "$shell" = 1 ] || echo "claude-mac-sandbox: warning: --net none blocks the Claude API; use --shell for offline work" >&2
+    P="$P
+
+;; ---- Network: none (unix sockets such as DNS still work)
+(deny network-outbound (remote ip \"*:*\"))" ;;
+  *) die "unknown --net '$net' (full|restricted|none)" ;;
+esac
+
+if [ "$print" = 1 ]; then printf '%s\n' "$P" | sed "s/localhost:$port/localhost:<proxy-port>/"; exit 0; fi
+
+# ------------------------------------------------------------ environment
+# Shims make swift/xcodebuild skip their own inner sandbox (nesting is refused).
+envs=(HOME="$HOME" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" PATH="$HERE/shims:$PATH"
+      SHELL=/bin/bash TERM="${TERM:-xterm-256color}" LANG="${LANG:-en_US.UTF-8}"
+      TMPDIR="${TMPDIR:-/tmp}" DISABLE_AUTOUPDATER=1
+      CLAUDE_SANDBOX=macos-seatbelt SANDBOX_PROJECT_DIR="$project")
+for v in LC_ALL COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION DEVELOPER_DIR CLAUDE_CONFIG_DIR; do
+  if [ -n "${!v:-}" ]; then envs+=("$v=${!v}"); fi
+done
+
+kc_read() { security find-generic-password -a "${USER:-$(id -un)}" -s "$1" -w 2>/dev/null; }
+case "$auth" in
+  login)  ;;
+  token)  t="$(kc_read "$KC_TOKEN")" || die "no Keychain item '$KC_TOKEN'. Create it: security add-generic-password -U -a \"\$USER\" -s $KC_TOKEN -w"
+          envs+=(CLAUDE_CODE_OAUTH_TOKEN="$t") ;;
+  apikey) k="$(kc_read "$KC_APIKEY")" || die "no Keychain item '$KC_APIKEY'. Create it: security add-generic-password -U -a \"\$USER\" -s $KC_APIKEY -w"
+          envs+=(ANTHROPIC_API_KEY="$k") ;;
+  *)      die "unknown --auth '$auth' (login|token|apikey)" ;;
+esac
+
+proxy_pid=""
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/claude-mac-sandbox.XXXXXX")"
+cleanup() {
+  if [ -n "$proxy_pid" ]; then kill "$proxy_pid" 2>/dev/null; wait "$proxy_pid" 2>/dev/null; fi
+  rm -rf "$workdir"
+}
+trap cleanup EXIT INT TERM HUP
+
+if [ "$net" = restricted ]; then
+  command -v tinyproxy >/dev/null || die "--net restricted needs tinyproxy: brew install tinyproxy"
+  files=("$REPO/allowlist/claude.txt")
+  if [ ${#allows[@]} -gt 0 ]; then
+    for a in "${allows[@]}"; do
+      if [ -f "$a" ]; then f="$a"; else f="$REPO/allowlist/$a.txt"; fi
+      [ -f "$f" ] || die "allowlist not found: $a"
+      files+=("$f")
+    done
+  fi
+  grep -hvE '^[[:space:]]*(#|$)' "${files[@]}" | sort -u > "$workdir/allowlist"
+  sed -e "s/^Port .*/Port $port/" -e "s/^Listen .*/Listen 127.0.0.1/" \
+      -e '/^Allow /d' -e "s#/etc/tinyproxy/allowlist#$workdir/allowlist#" \
+      "$REPO/proxy/tinyproxy.conf" > "$workdir/tinyproxy.conf"
+  echo "Allow 127.0.0.1" >> "$workdir/tinyproxy.conf"
+  mkdir -p "$STATE_DIR"; plog="$STATE_DIR/proxy-$port.log"
+  tinyproxy -d -c "$workdir/tinyproxy.conf" >"$plog" 2>&1 &
+  proxy_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.25
+  done
+  kill -0 "$proxy_pid" 2>/dev/null || die "proxy failed to start; see $plog"
+  px="http://127.0.0.1:$port"
+  envs+=(HTTPS_PROXY="$px" https_proxy="$px" HTTP_PROXY="$px" http_proxy="$px"
+         NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1
+         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 SANDBOX_PROXY_LOG="$plog")
+  echo "claude-mac-sandbox: restricted network via local proxy (log: $plog)" >&2
+fi
+
+printf '%s\n' "$P" > "$workdir/profile.sb"
+
+# ------------------------------------------------------------ run
+if [ "$shell" = 1 ]; then
+  cmd=(/bin/bash)
+else
+  claude_bin="$(command -v claude)" || die "claude not found on PATH; install it: curl -fsSL https://claude.ai/install.sh | bash"
+  cmd=("$claude_bin")
+  [ "$yolo" = 1 ] && cmd+=(--dangerously-skip-permissions)
+fi
+if [ ${#passthru[@]} -gt 0 ]; then cmd+=("${passthru[@]}"); fi
+
+cd "$project"
+set +e
+env -i "${envs[@]}" /usr/bin/sandbox-exec -f "$workdir/profile.sb" "${cmd[@]}"
+rc=$?
+set -e
+exit "$rc"

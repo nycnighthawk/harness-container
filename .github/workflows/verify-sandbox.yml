@@ -1,0 +1,86 @@
+name: Verify Claude Code sandbox
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"   # weekly: catch upstream Claude Code / base image changes
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck -S warning claude-sandbox.sh check-rootless.sh tests/run-tests.sh macos/*.sh tests/macos/run-tests.sh macos/shims/* .github/*.sh
+      - name: Guide matches the launchers
+        run: python3 tests/check-guide.py
+
+      - name: hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Containerfile
+          docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < proxy/Containerfile
+
+  verify:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare rootless podman
+        run: .github/ci-step.sh .github/prepare-podman.sh
+
+      - name: Build sandbox image
+        run: .github/ci-step.sh podman build -t claude-sandbox .
+
+      - name: Build proxy image
+        run: .github/ci-step.sh podman build -t claude-sandbox-proxy proxy/
+
+      - name: Run verification suite
+        env:
+          # Optional: add these repository secrets to enable the live Claude tests.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: .github/ci-step.sh tests/run-tests.sh
+
+  macos:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-14]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Claude Code and tinyproxy
+        run: |
+          .github/ci-step.sh 'curl -fsSL https://claude.ai/install.sh | bash'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          .github/ci-step.sh 'brew install tinyproxy'
+
+      - name: Show environment
+        run: |
+          sw_vers; uname -m; xcodebuild -version || true; swift --version; claude --version
+          /usr/bin/sandbox-exec -p "(version 1)(allow default)" /usr/bin/true && echo "sandbox-exec OK"
+
+      - name: Run macOS verification suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: .github/ci-step.sh /bin/bash tests/macos/run-tests.sh

@@ -1,0 +1,7 @@
+#!/bin/bash
+# Shim used inside claude-mac-sandbox: same reason as the swift shim. Xcode's
+# package manifest and plugin sandboxes can't nest inside the outer sandbox.
+here="$(cd "$(dirname "$0")" && pwd -P)"
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd: -)"
+real="$(command -v xcodebuild)" || { echo "xcodebuild not found" >&2; exit 127; }
+exec "$real" "$@" -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES
